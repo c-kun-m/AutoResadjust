@@ -2,7 +2,11 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -74,6 +78,13 @@ func (p *child) stop() {
 }
 
 type execution struct {
+	warming        bool
+	warmCancel     context.CancelFunc
+	preparing      bool
+	prepareCancel  context.CancelFunc
+	backend        Backend
+	wasReady       bool
+	healthFailures int
 	work           platform.WorkAssignment
 	report         platform.WorkerReport
 	rpc, model     *child
@@ -99,7 +110,7 @@ func NewExecutor(cfg ExecutorConfig, m *telemetry.Registry) *Executor {
 	return &Executor{cfg: cfg, metrics: m, client: &http.Client{Timeout: 2 * time.Second}}
 }
 
-func (e *Executor) Enabled() bool { return e.cfg.RPCBinary != "" && e.cfg.ServerBinary != "" }
+func (e *Executor) Enabled() bool { return len(e.Capabilities()) > 0 }
 
 func (e *Executor) launch(binary string, args, env []string) (*child, error) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -140,6 +151,10 @@ func (e *Executor) Apply(work []platform.WorkAssignment) error {
 		return nil
 	}
 	w := work[0]
+	backend, err := selectBackend(w.Spec.Backend)
+	if err != nil {
+		return err
+	}
 	if w.Placement.NodeID != e.cfg.NodeID || w.Token == "" {
 		return fmt.Errorf("invalid assignment identity")
 	}
@@ -153,8 +168,12 @@ func (e *Executor) Apply(work []platform.WorkAssignment) error {
 	}
 	if e.current == nil {
 		rpcID, modelID := serviceIDs(e.cfg.NodeID, w.DeploymentID)
-		e.current = &execution{work: w, rpcID: rpcID, modelID: modelID, report: platform.WorkerReport{DeploymentID: w.DeploymentID, NodeID: e.cfg.NodeID, Token: w.Token, RPCState: "starting"}}
-		e.metrics.Register(telemetry.Service{ID: rpcID, Name: "GPU RPC worker", Kind: "rpc-worker", NodeID: e.cfg.NodeID, DeploymentID: w.DeploymentID, Address: w.Placement.RPCAddress, Traffic: true})
+		e.current = &execution{backend: backend, work: w, rpcID: rpcID, modelID: modelID, report: platform.WorkerReport{DeploymentID: w.DeploymentID, NodeID: e.cfg.NodeID, Token: w.Token, RPCState: "starting"}}
+		if backend.Kind() != platform.BackendLocal {
+			e.metrics.Register(telemetry.Service{ID: rpcID, Name: "GPU RPC worker", Kind: "rpc-worker", NodeID: e.cfg.NodeID, DeploymentID: w.DeploymentID, Address: w.Placement.RPCAddress, Traffic: true})
+		} else {
+			e.current.report.RPCState = "ready"
+		}
 		if w.Placement.Coordinator {
 			e.metrics.Register(telemetry.Service{ID: modelID, Name: "Model inference server", Kind: "model-server", NodeID: e.cfg.NodeID, DeploymentID: w.DeploymentID, Address: w.Placement.AgentURL + "/inference", HTTP: true, Traffic: true})
 		}
@@ -168,18 +187,18 @@ func (e *Executor) Apply(work []platform.WorkAssignment) error {
 	if x.finished {
 		return nil
 	} // Failed/expired attempts require a new assignment token.
-	if x.rpc == nil {
+	if x.rpc == nil && backend.Kind() != platform.BackendLocal {
 		if !e.Enabled() {
 			e.failLocked("executor binaries are not configured")
 			return nil
 		}
-		_, port, err := net.SplitHostPort(e.cfg.RPCBackend)
+		command, err := backend.Worker(e.cfg, w)
 		if err != nil {
 			e.failLocked(err.Error())
 			return nil
 		}
 		// UUID isolation makes the selected GPU the only CUDA device in this process.
-		x.rpc, err = e.launch(e.cfg.RPCBinary, []string{"--host", "127.0.0.1", "--port", port, "--device", "CUDA0"}, []string{"CUDA_VISIBLE_DEVICES=" + w.Placement.GPUID, "GGML_RPC_NO_RDMA=1"})
+		x.rpc, err = e.launch(command.Binary, command.Args, command.Env)
 		if err != nil {
 			e.failLocked(err.Error())
 			return nil
@@ -192,23 +211,51 @@ func (e *Executor) Apply(work []platform.WorkAssignment) error {
 		x.proxyStop = make(chan struct{})
 		go e.metrics.ServeTCP(listener, e.cfg.RPCBackend, x.rpcID, x.proxyStop)
 	}
-	if w.StartModel && x.model == nil && x.report.RPCState == "ready" {
-		args, err := ModelArgs(e.cfg, w)
-		if err != nil {
-			e.failLocked(err.Error())
-			return nil
-		}
-		x.model, err = e.launch(e.cfg.ServerBinary, args, []string{"CUDA_VISIBLE_DEVICES=-1", "GGML_RPC_NO_RDMA=1"})
-		if err != nil {
-			e.failLocked(err.Error())
-			return nil
-		}
+	if w.StartModel && x.model == nil && !x.preparing && x.report.RPCState == "ready" {
+		ctx, cancel := context.WithCancel(context.Background())
+		x.prepareCancel = cancel
+		x.preparing = true
 		x.report.ModelState = "starting"
+		e.metrics.State(x.modelID, "loading", "verifying model artifact")
+		go func() {
+			command, err := backend.Model(ctx, e.cfg, w)
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			defer cancel()
+			if e.current != x || x.finished || x.draining || ctx.Err() != nil {
+				return
+			}
+			x.preparing = false
+			if err != nil {
+				e.failLocked(err.Error())
+				return
+			}
+			x.model, err = e.launch(command.Binary, command.Args, command.Env)
+			if err != nil {
+				e.failLocked(err.Error())
+			}
+		}()
 	}
 	return nil
 }
 
 func ModelArgs(cfg ExecutorConfig, w platform.WorkAssignment) ([]string, error) {
+	return modelArgs(context.Background(), cfg, w)
+}
+
+type contextReader struct {
+	ctx context.Context
+	io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.Reader.Read(p)
+}
+
+func modelArgs(ctx context.Context, cfg ExecutorConfig, w platform.WorkAssignment) ([]string, error) {
 	if w.Spec.ModelFile == "" || strings.ContainsAny(w.Spec.ModelFile, "/\\:\x00") {
 		return nil, fmt.Errorf("model must be a filename in model-dir")
 	}
@@ -231,6 +278,21 @@ func ModelArgs(cfg ExecutorConfig, w platform.WorkAssignment) ([]string, error) 
 	if info.Size() > w.Spec.WeightMiB*1024*1024 {
 		return nil, fmt.Errorf("GGUF file exceeds declared weight_mib; replan with actual size")
 	}
+	if w.Spec.ModelSHA256 != "" {
+		f, err := os.Open(file)
+		if err != nil {
+			return nil, err
+		}
+		h := sha256.New()
+		_, err = io.Copy(h, contextReader{ctx, f})
+		f.Close()
+		if err != nil {
+			return nil, err
+		}
+		if hex.EncodeToString(h.Sum(nil)) != strings.ToLower(w.Spec.ModelSHA256) {
+			return nil, fmt.Errorf("model checksum does not match registered artifact")
+		}
+	}
 	var addresses, ratios, devices []string
 	for i, p := range w.Peers {
 		addresses = append(addresses, p.RPCAddress)
@@ -241,6 +303,12 @@ func ModelArgs(cfg ExecutorConfig, w platform.WorkAssignment) ([]string, error) 
 	if err != nil {
 		return nil, err
 	}
+	if w.Spec.Backend == platform.BackendLocal {
+		if w.Spec.Layers < 1 || w.Spec.GPULayers < 0 || w.Spec.GPULayers > w.Spec.Layers || w.Spec.RAMMiB < w.Spec.WeightMiB+w.Spec.KVCacheMiB+w.Spec.ReserveMiB {
+			return nil, fmt.Errorf("invalid local offload budget")
+		}
+		return []string{"--model", file, "--alias", w.DeploymentID, "--host", "127.0.0.1", "--port", port, "--device", "CUDA0", "--n-gpu-layers", strconv.Itoa(w.Spec.GPULayers), "--ctx-size", strconv.Itoa(w.Spec.ContextSize), "--fit", "off", "--parallel", "1", "--load-mode", "none", "--lazy-mode", "off", "--metrics"}, nil
+	}
 	return []string{"--model", file, "--alias", w.DeploymentID, "--host", "127.0.0.1", "--port", port, "--rpc", strings.Join(addresses, ","), "--device", strings.Join(devices, ","), "--tensor-split", strings.Join(ratios, ","), "--split-mode", "layer", "--n-gpu-layers", "999", "--ctx-size", strconv.Itoa(w.Spec.ContextSize), "--fit", "off", "--parallel", "1", "--metrics"}, nil
 }
 
@@ -248,6 +316,12 @@ func (e *Executor) failLocked(message string) {
 	x := e.current
 	if x == nil {
 		return
+	}
+	if x.prepareCancel != nil {
+		x.prepareCancel()
+	}
+	if x.warmCancel != nil {
+		x.warmCancel()
 	}
 	x.report.Message = message
 	if x.model != nil {
@@ -275,6 +349,12 @@ func (e *Executor) stopLocked(message string) {
 	x := e.current
 	if x == nil {
 		return
+	}
+	if x.prepareCancel != nil {
+		x.prepareCancel()
+	}
+	if x.warmCancel != nil {
+		x.warmCancel()
 	}
 	x.draining = true
 	// The HTTP gateway prevents new requests as soon as draining starts. Give
@@ -357,18 +437,78 @@ func (e *Executor) Tick() {
 			resp.Body.Close()
 		}
 		if ready {
+			if !x.wasReady {
+				if !x.warming {
+					e.warmModelLocked(x)
+				}
+				return
+			}
+			x.healthFailures = 0
 			x.report.ModelState = "ready"
 			e.metrics.State(x.modelID, "ready", "model loaded and engine health ready")
 			e.collectEngine(x.modelID)
 		} else {
+			x.healthFailures++
 			x.report.ModelState = "starting"
-			e.metrics.State(x.modelID, "loading", "waiting for model health check")
-			if time.Since(x.model.started) > 15*time.Minute {
+			if x.wasReady {
+				x.report.ModelState = "degraded"
+				e.metrics.State(x.modelID, "degraded", "runtime health probe failed; inference admission closed")
+			} else {
+				e.metrics.State(x.modelID, "loading", "waiting for model health check")
+			}
+			if !x.wasReady && time.Since(x.model.started) > 15*time.Minute {
 				e.failLocked("model load timeout")
 				return
 			}
 		}
 	}
+}
+
+// A listener/health response is not proof that all model layers can execute.
+// Warmup runs outside the executor lock so heartbeats and stop remain responsive.
+func (e *Executor) warmModelLocked(x *execution) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	x.warming = true
+	x.warmCancel = cancel
+	deploymentID := x.work.DeploymentID
+	e.metrics.State(x.modelID, "loading", "running end-to-end model warmup")
+	go func() {
+		defer cancel()
+		body, _ := json.Marshal(map[string]any{"model": deploymentID, "messages": []map[string]string{{"role": "user", "content": "Hello"}}, "max_tokens": 1, "stream": false, "temperature": 0})
+		req, err := http.NewRequestWithContext(ctx, "POST", "http://"+e.cfg.ModelBackend+"/v1/chat/completions", bytes.NewReader(body))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+			client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+			var resp *http.Response
+			resp, err = client.Do(req)
+			if resp != nil {
+				var result struct {
+					Choices []json.RawMessage `json:"choices"`
+				}
+				if resp.StatusCode != 200 {
+					err = fmt.Errorf("warmup HTTP %d", resp.StatusCode)
+				} else if decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); decodeErr != nil || len(result.Choices) == 0 {
+					err = fmt.Errorf("warmup did not produce a completion")
+				}
+				resp.Body.Close()
+			}
+		}
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if e.current != x || x.finished || x.draining {
+			return
+		}
+		x.warming = false
+		if err != nil {
+			e.failLocked(fmt.Sprintf("end-to-end warmup failed: %v", err))
+			return
+		}
+		x.wasReady = true
+		x.healthFailures = 0
+		x.report.ModelState = "ready"
+		e.metrics.State(x.modelID, "ready", "model warmup completed")
+		e.collectEngine(x.modelID)
+	}()
 }
 
 func (e *Executor) collectEngine(id string) {

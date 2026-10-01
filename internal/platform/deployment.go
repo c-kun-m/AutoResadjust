@@ -11,13 +11,21 @@ import (
 )
 
 type AgentEndpoint struct {
-	URL           string `json:"url"`
-	RPCAddress    string `json:"rpc_address"`
-	EngineVersion string `json:"engine_version"`
-	NetworkGroup  string `json:"network_group"`
+	Backends      []string `json:"backends,omitempty"`
+	URL           string   `json:"url"`
+	RPCAddress    string   `json:"rpc_address"`
+	EngineVersion string   `json:"engine_version"`
+	NetworkGroup  string   `json:"network_group"`
 }
 
 type DeploymentSpec struct {
+	Backend        string   `json:"backend,omitempty"`
+	ModelRef       string   `json:"model_ref,omitempty"`
+	Layers         int      `json:"layers,omitempty"`
+	GPULayers      int      `json:"gpu_layers,omitempty"`
+	RAMMiB         int64    `json:"ram_mib,omitempty"`
+	HostReserveMiB int64    `json:"host_reserve_mib,omitempty"`
+	ModelSHA256    string   `json:"model_sha256,omitempty"`
 	Name           string   `json:"name"`
 	ModelFile      string   `json:"model_file"`
 	WeightMiB      int64    `json:"weight_mib"`
@@ -33,6 +41,7 @@ type DeploymentSpec struct {
 }
 
 type Placement struct {
+	RAMMiB         int64   `json:"ram_mib,omitempty"`
 	NodeID         string  `json:"node_id"`
 	GPUID          string  `json:"gpu_id"`
 	AgentURL       string  `json:"agent_url"`
@@ -85,6 +94,12 @@ type WorkAssignment struct {
 }
 
 func normalizeDeployment(s DeploymentSpec) (DeploymentSpec, error) {
+	if s.Backend == "" {
+		s.Backend = BackendRPC
+	}
+	if s.Backend != BackendRPC && s.Backend != BackendLocal {
+		return s, fmt.Errorf("unsupported backend %q", s.Backend)
+	}
 	s.Name = strings.TrimSpace(s.Name)
 	if s.Name == "" || len(s.Name) > 120 {
 		return s, fmt.Errorf("name is required (max 120 characters)")
@@ -110,13 +125,35 @@ func normalizeDeployment(s DeploymentSpec) (DeploymentSpec, error) {
 	if s.ContextSize < 128 || s.ContextSize > 131072 {
 		return s, fmt.Errorf("context_size must be 128..131072")
 	}
-	if s.MinNodes == 0 {
+	if s.Backend == BackendLocal {
+		if s.MinNodes == 0 {
+			s.MinNodes = 1
+		}
+		if s.MaxNodes == 0 {
+			s.MaxNodes = 1
+		}
+		if s.MinNodes != 1 || s.MaxNodes != 1 {
+			return s, fmt.Errorf("llama_local requires exactly one node")
+		}
+		if s.Layers < 1 || s.Layers > 1024 || s.GPULayers < 0 || s.GPULayers > s.Layers {
+			return s, fmt.Errorf("local offload requires actual layers and gpu_layers in 0..layers")
+		}
+		if s.RAMMiB <= 0 || s.RAMMiB > 1<<30 {
+			return s, fmt.Errorf("ram_mib must reserve host memory for the local model")
+		}
+		if s.HostReserveMiB == 0 {
+			s.HostReserveMiB = 4096
+		}
+		if s.HostReserveMiB < 0 || s.HostReserveMiB > 1<<30 {
+			return s, fmt.Errorf("invalid host reserve")
+		}
+	} else if s.MinNodes == 0 {
 		s.MinNodes = 2
 	}
 	if s.MaxNodes == 0 {
 		s.MaxNodes = 8
 	}
-	if s.MinNodes < 2 || s.MaxNodes < s.MinNodes || s.MaxNodes > 8 {
+	if (s.Backend != BackendLocal && s.MinNodes < 2) || s.MaxNodes < s.MinNodes || s.MaxNodes > 8 {
 		return s, fmt.Errorf("require 2..8 nodes with max_nodes >= min_nodes")
 	}
 	if s.NetworkGroup == "" {
@@ -150,7 +187,7 @@ func validEndpoint(a *AgentEndpoint) bool {
 func (c *Controller) PlanDeployment(spec DeploymentSpec) (DeploymentPlan, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	s, e := normalizeDeployment(spec)
+	s, e := c.resolveDeployment(spec)
 	if e != nil {
 		return DeploymentPlan{}, e
 	}
@@ -158,6 +195,9 @@ func (c *Controller) PlanDeployment(spec DeploymentSpec) (DeploymentPlan, error)
 }
 
 func (c *Controller) planDeployment(s DeploymentSpec) (DeploymentPlan, error) {
+	if s.Backend == BackendLocal {
+		return c.planLocalDeployment(s)
+	}
 	plan := DeploymentPlan{Placements: []Placement{}, Rejections: map[string][]string{}, Warning: "Capacity estimate only: layer rounding, actual KV cache and workspace must pass engine load and warmup. One NVIDIA GPU per node; selected nodes are exclusive. RPC requires a trusted private network."}
 	var candidates []Placement
 	versions := map[string]string{}
@@ -185,7 +225,7 @@ func (c *Controller) planDeployment(s DeploymentSpec) (DeploymentPlan, error) {
 		if n.DeploymentID != "" || c.nodeBusyLocked(n.ID, n) {
 			reasons = append(reasons, "node already has a task or deployment")
 		}
-		if !validEndpoint(n.Agent) {
+		if !validEndpoint(n.Agent) || !supportsBackend(n.Agent, BackendRPC) {
 			reasons = append(reasons, "distributed executor is not configured")
 		} else if n.Agent.NetworkGroup != s.NetworkGroup {
 			reasons = append(reasons, "network group mismatch")
@@ -281,7 +321,7 @@ func cloneDeployment(d Deployment) Deployment {
 func (c *Controller) CreateDeployment(spec DeploymentSpec) (Deployment, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	s, err := normalizeDeployment(spec)
+	s, err := c.resolveDeployment(spec)
 	if err != nil {
 		return Deployment{}, false, err
 	}
@@ -382,7 +422,7 @@ func (c *Controller) ReportWorkers(node string, reports []WorkerReport) error {
 		if d.Phase == "stopped" || d.Phase == "failed" {
 			continue
 		}
-		if !contains([]string{"starting", "ready", "failed", "stopped"}, r.RPCState) || !contains([]string{"", "starting", "ready", "failed", "stopped"}, r.ModelState) {
+		if !contains([]string{"starting", "ready", "failed", "stopped"}, r.RPCState) || !contains([]string{"", "starting", "ready", "degraded", "failed", "stopped"}, r.ModelState) {
 			return fmt.Errorf("invalid worker state")
 		}
 		r.ObservedAt = c.now().UTC()
@@ -417,7 +457,7 @@ func (c *Controller) ReconcileDeployments() {
 			c.deployments[id] = d
 			continue
 		}
-		allRPC, modelReady, allStopped, stale := true, false, true, false
+		allRPC, modelReady, allStopped, stale, unhealthy := true, false, true, false, false
 		for _, p := range d.Plan.Placements {
 			r, ok := d.Workers[p.NodeID]
 			fresh := ok && c.now().Sub(r.ObservedAt) <= 35*time.Second
@@ -429,6 +469,7 @@ func (c *Controller) ReconcileDeployments() {
 			}
 			if p.Coordinator {
 				modelReady = fresh && r.ModelState == "ready"
+				unhealthy = r.ModelState == "degraded"
 			}
 			if !ok || r.RPCState != "stopped" || (p.Coordinator && r.ModelState != "stopped") {
 				allStopped = false
@@ -446,6 +487,9 @@ func (c *Controller) ReconcileDeployments() {
 		} else if allRPC && modelReady {
 			d.Phase = "ready"
 			d.Message = "all workers and model health check are ready"
+		} else if unhealthy {
+			d.Phase = "degraded"
+			d.Message = "model runtime unhealthy; new inference requests blocked; resources retained"
 		} else if stale && c.now().Sub(d.CreatedAt) > 35*time.Second {
 			d.Phase = "degraded"
 			d.Message = "worker telemetry missing; new inference requests blocked; resources retained"
@@ -517,8 +561,8 @@ func (s *InMemoryStore) ReserveGroup(owner string, ps []Placement, now time.Time
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	seen := map[string]bool{}
-	if owner == "" || len(ps) < 2 {
-		return fmt.Errorf("distributed group requires an owner and at least two nodes")
+	if owner == "" || len(ps) < 1 {
+		return fmt.Errorf("deployment requires an owner and at least one node")
 	}
 	for _, p := range ps {
 		n, ok := s.nodes[p.NodeID]
@@ -526,6 +570,9 @@ func (s *InMemoryStore) ReserveGroup(owner string, ps []Placement, now time.Time
 			return fmt.Errorf("node %s is unavailable for reservation", p.NodeID)
 		}
 		seen[p.NodeID] = true
+		if p.RAMMiB > 0 && (n.Host == nil || n.Host.MemoryAvailableMiB < p.RAMMiB || n.ReservedRAMMiB != 0) {
+			return fmt.Errorf("host RAM changed during planning on %s", p.NodeID)
+		}
 		if len(s.allocations[p.NodeID]) > 0 {
 			return fmt.Errorf("node %s has existing reservations", p.NodeID)
 		}
@@ -542,6 +589,7 @@ func (s *InMemoryStore) ReserveGroup(owner string, ps []Placement, now time.Time
 	for _, p := range ps {
 		n := s.nodes[p.NodeID]
 		n.DeploymentID = owner
+		n.ReservedRAMMiB = p.RAMMiB
 		if s.allocations[p.NodeID] == nil {
 			s.allocations[p.NodeID] = map[string]string{}
 		}
@@ -574,6 +622,7 @@ func (s *InMemoryStore) ReleaseGroup(owner string) {
 			}
 		}
 		n.DeploymentID = ""
+		n.ReservedRAMMiB = 0
 		s.nodes[id] = n
 	}
 }

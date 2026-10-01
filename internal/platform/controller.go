@@ -27,6 +27,7 @@ type Controller struct {
 	sequence       uint64
 	deployments    map[string]Deployment
 	deploymentKeys map[string]string
+	artifacts      map[string]ModelArtifact
 }
 
 func NewController(store *InMemoryStore) *Controller {
@@ -38,6 +39,7 @@ func NewController(store *InMemoryStore) *Controller {
 		Scheduler: NewScheduler(store, DefaultSchedulerWeights()),
 		now:       time.Now, keys: make(map[string]string),
 		deployments: make(map[string]Deployment), deploymentKeys: make(map[string]string),
+		artifacts: make(map[string]ModelArtifact),
 	}
 }
 
@@ -107,6 +109,7 @@ func (c *Controller) UpdateNode(id string, patch ResourceNode) (ResourceNode, er
 	// The edge agent owns observations.  Never let a configuration update
 	// replace GPUs, reservations, or heartbeat freshness.
 	patch.GPUs = current.GPUs
+	patch.Host = current.Host
 	patch.Agent = current.Agent
 	patch.DeploymentID = current.DeploymentID
 	patch.LastHeartbeat = current.LastHeartbeat
@@ -223,6 +226,14 @@ func (c *Controller) nodeBusyLocked(id string, node ResourceNode) bool {
 }
 
 func validateNode(node ResourceNode) error {
+	if h := node.Host; h != nil {
+		if h.MemoryTotalMiB <= 0 || h.MemoryAvailableMiB < 0 || h.MemoryAvailableMiB > h.MemoryTotalMiB || h.CPUCount < 1 {
+			return fmt.Errorf("invalid host resource observation")
+		}
+		if h.CPUUtilizationPct != nil && !(*h.CPUUtilizationPct >= 0 && *h.CPUUtilizationPct <= 100) {
+			return fmt.Errorf("invalid CPU utilization")
+		}
+	}
 	if node.ID == "" {
 		return fmt.Errorf("node id is required")
 	}

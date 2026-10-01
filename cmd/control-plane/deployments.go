@@ -99,7 +99,9 @@ func (s *apiServer) expectServices() {
 		s.metrics.Register(telemetry.Service{ID: "gateway/" + d.ID, Name: d.Spec.Name + " gateway", Kind: "inference-gateway", DeploymentID: d.ID, HTTP: true, Traffic: true})
 		s.metrics.State("gateway/"+d.ID, d.Phase, d.Message)
 		for _, p := range d.Plan.Placements {
-			s.metrics.Expect(telemetry.Service{ID: p.NodeID + "/rpc/" + d.ID, Name: "GPU RPC worker", Kind: "rpc-worker", NodeID: p.NodeID, DeploymentID: d.ID, Address: p.RPCAddress, Traffic: true})
+			if d.Spec.Backend != platform.BackendLocal {
+				s.metrics.Expect(telemetry.Service{ID: p.NodeID + "/rpc/" + d.ID, Name: "GPU RPC worker", Kind: "rpc-worker", NodeID: p.NodeID, DeploymentID: d.ID, Address: p.RPCAddress, Traffic: true})
+			}
 			if p.Coordinator {
 				s.metrics.Expect(telemetry.Service{ID: p.NodeID + "/model/" + d.ID, Name: d.Spec.Name, Kind: "model-server", NodeID: p.NodeID, DeploymentID: d.ID, Address: p.AgentURL + "/inference", HTTP: true, Traffic: true})
 			}
@@ -114,6 +116,13 @@ func (s *apiServer) extendedRoute(w http.ResponseWriter, r *http.Request, path s
 		s.metrics.Prometheus(w, r)
 		for _, n := range s.controller.Nodes.ListNodes() {
 			fresh := !n.LastHeartbeat.IsZero() && time.Since(n.LastHeartbeat) < 35*time.Second
+			if fresh && n.Host != nil {
+				labels := "node=" + strconv.Quote(n.ID)
+				fmt.Fprintf(w, "platform_host_memory_total_bytes{%s} %d\nplatform_host_memory_available_bytes{%s} %d\nplatform_host_memory_reserved_bytes{%s} %d\nplatform_host_cpu_count{%s} %d\n", labels, n.Host.MemoryTotalMiB*1048576, labels, n.Host.MemoryAvailableMiB*1048576, labels, n.ReservedRAMMiB*1048576, labels, n.Host.CPUCount)
+				if n.Host.CPUUtilizationPct != nil {
+					fmt.Fprintf(w, "platform_host_cpu_utilization_percent{%s} %g\n", labels, *n.Host.CPUUtilizationPct)
+				}
+			}
 			for _, g := range n.GPUs {
 				labels := "node=" + strconv.Quote(n.ID) + ",gpu=" + strconv.Quote(g.ID) + ",model=" + strconv.Quote(g.Model)
 				if !fresh {
@@ -124,6 +133,22 @@ func (s *apiServer) extendedRoute(w http.ResponseWriter, r *http.Request, path s
 					fmt.Fprintf(w, "platform_gpu_utilization_percent{%s} %g\n", labels, *g.UtilizationPct)
 				}
 			}
+		}
+		return true
+	case path == "/api/v1/model-artifacts" && r.Method == "GET":
+		writeJSON(w, 200, s.controller.ListArtifacts())
+		return true
+	case path == "/api/v1/model-artifacts" && r.Method == "POST":
+		var a platform.ModelArtifact
+		if err := decodeJSON(r, &a); err != nil {
+			writeError(w, 400, err)
+			return true
+		}
+		a, err := s.controller.RegisterArtifact(a)
+		if err != nil {
+			writeError(w, 400, err)
+		} else {
+			writeJSON(w, 201, a)
 		}
 		return true
 	case path == "/api/v1/monitor/services" && r.Method == "GET":

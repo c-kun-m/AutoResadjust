@@ -17,6 +17,7 @@ type snapshot struct {
 	Keys           map[string]string            `json:"keys"`
 	Deployments    map[string]Deployment        `json:"deployments"`
 	DeploymentKeys map[string]string            `json:"deployment_keys"`
+	Artifacts      map[string]ModelArtifact     `json:"artifacts,omitempty"`
 }
 
 // Save holds the controller lock through replacement, preventing an older
@@ -30,7 +31,7 @@ func (c *Controller) Save(path string) error {
 	defer c.mu.Unlock()
 	c.Nodes.mu.RLock()
 	defer c.Nodes.mu.RUnlock()
-	data, err := json.Marshal(snapshot{1, c.Nodes.nodes, c.Nodes.tasks, c.Nodes.allocations, c.Nodes.blocked, c.keys, c.deployments, c.deploymentKeys})
+	data, err := json.Marshal(snapshot{Version: 2, Nodes: c.Nodes.nodes, Tasks: c.Nodes.tasks, Allocations: c.Nodes.allocations, Blocked: c.Nodes.blocked, Keys: c.keys, Deployments: c.deployments, DeploymentKeys: c.deploymentKeys, Artifacts: c.artifacts})
 	if err != nil {
 		return err
 	}
@@ -77,7 +78,7 @@ func LoadController(path string) (*Controller, error) {
 	if err = json.Unmarshal(data, &s); err != nil {
 		return nil, err
 	}
-	if s.Version != 1 {
+	if s.Version != 1 && s.Version != 2 {
 		return nil, fmt.Errorf("unsupported state version %d", s.Version)
 	}
 	if s.Nodes != nil {
@@ -101,11 +102,17 @@ func LoadController(path string) (*Controller, error) {
 	if s.DeploymentKeys != nil {
 		c.deploymentKeys = s.DeploymentKeys
 	}
+	if s.Artifacts != nil {
+		c.artifacts = s.Artifacts
+	}
 	for id, n := range c.Nodes.nodes {
 		n.LastHeartbeat = time.Time{}
 		c.Nodes.nodes[id] = n
 	}
 	for id, d := range c.deployments {
+		if d.Spec.Backend == "" {
+			d.Spec.Backend = BackendRPC
+		}
 		for node, r := range d.Workers {
 			r.ObservedAt = time.Time{}
 			d.Workers[node] = r

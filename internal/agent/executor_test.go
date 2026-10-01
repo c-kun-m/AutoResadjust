@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -75,13 +76,22 @@ func TestEngineHelper(t *testing.T) {
 		}
 		os.Exit(0)
 	}
-	if os.Getenv("CUDA_VISIBLE_DEVICES") != "-1" {
+	if os.Getenv("CUDA_VISIBLE_DEVICES") != "-1" && os.Getenv("CUDA_VISIBLE_DEVICES") != "GPU-selected" {
 		os.Exit(5)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"status":"ok"}`) })
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "llamacpp:tokens_predicted_total 12") })
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			MaxTokens int `json:"max_tokens"`
+		}
+		json.NewDecoder(r.Body).Decode(&input)
+		if input.MaxTokens == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"choices":[{"message":{"content":"test"}}]}`)
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"delta\":\"test\"}\n\n")
 		w.(http.Flusher).Flush()

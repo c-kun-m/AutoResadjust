@@ -135,17 +135,20 @@ func runAgent() {
 		}
 	}()
 	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	hostProbe := &agent.HostProbe{}
 	syncOnce := func() {
 		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		gpus, probeErr := agent.Probe(probeCtx, *allowEmpty, *topology)
 		cancel()
 		node := platform.ResourceNode{ID: *nodeID, Name: *nodeName, Datacenter: *site, Region: *site, Runtime: *runtimeName, Health: platform.NodeDegraded, GPUs: gpus, LastHeartbeat: time.Now().UTC()}
+		node.Host = hostProbe.Probe()
 		if probeErr == nil && len(gpus) > 0 {
 			node.Health = platform.NodeReady
 			node.SchedulingEnabled = true
 		}
 		if ex.Enabled() {
 			node.Agent = &platform.AgentEndpoint{URL: "http://" + net.JoinHostPort(*advertise, httpPort), RPCAddress: net.JoinHostPort(*advertise, rpcPort), EngineVersion: *engineVersion, NetworkGroup: *network}
+			node.Agent.Backends = ex.Capabilities()
 		}
 		payload := map[string]any{"node": node, "reports": ex.Reports(), "services": m.List(false)}
 		body, err := json.Marshal(payload)

@@ -59,6 +59,8 @@ func (g GPU) Available() bool {
 // ResourceNode is the scheduling view of one independent execution server.
 // Legacy tasks use one node; distributed deployments reserve a group of nodes.
 type ResourceNode struct {
+	Host              *HostResources    `json:"host,omitempty"`
+	ReservedRAMMiB    int64             `json:"reserved_ram_mib,omitempty"`
 	Agent             *AgentEndpoint    `json:"agent,omitempty"`
 	DeploymentID      string            `json:"deployment_id,omitempty"`
 	ID                string            `json:"id"`
@@ -76,6 +78,15 @@ type ResourceNode struct {
 	CostPerGPUHour    float64           `json:"cost_per_gpu_hour"`
 	DataReady         map[string]bool   `json:"data_ready,omitempty"`
 	SchedulingEnabled bool              `json:"scheduling_enabled"`
+}
+
+// HostResources describes measured host capacity, never a scheduling estimate.
+// Nil means the agent could not collect it; missing data is not zero usage.
+type HostResources struct {
+	MemoryTotalMiB     int64    `json:"memory_total_mib"`
+	MemoryAvailableMiB int64    `json:"memory_available_mib"`
+	CPUCount           int      `json:"cpu_count"`
+	CPUUtilizationPct  *float64 `json:"cpu_utilization_pct,omitempty"`
 }
 
 // TaskSpec contains scheduling intent. The executor may add runtime details

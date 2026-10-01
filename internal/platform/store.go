@@ -71,6 +71,7 @@ func (s *InMemoryStore) upsertNode(node ResourceNode, heartbeat bool) error {
 	}
 	previous, hadPrevious := s.nodes[node.ID]
 	node.DeploymentID = previous.DeploymentID
+	node.ReservedRAMMiB = previous.ReservedRAMMiB
 	if heartbeat && !hadPrevious {
 		node.SchedulingEnabled = false
 	}
@@ -296,7 +297,16 @@ func cloneNode(in ResourceNode) ResourceNode {
 	out := in
 	if in.Agent != nil {
 		a := *in.Agent
+		a.Backends = append([]string(nil), in.Agent.Backends...)
 		out.Agent = &a
+	}
+	if in.Host != nil {
+		h := *in.Host
+		if h.CPUUtilizationPct != nil {
+			v := *h.CPUUtilizationPct
+			h.CPUUtilizationPct = &v
+		}
+		out.Host = &h
 	}
 	out.Labels = cloneStringMap(in.Labels)
 	out.CachedModels = cloneBoolMap(in.CachedModels)
