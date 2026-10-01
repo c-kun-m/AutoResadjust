@@ -19,18 +19,22 @@ const (
 // Artifacts are immutable: a new revision/quantization must get a new ID.
 // Registration does not download weights or claim a hardware compatibility test.
 type ModelArtifact struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Format       string `json:"format"`
-	File         string `json:"file"`
-	Revision     string `json:"revision"`
-	SHA256       string `json:"sha256"`
-	Architecture string `json:"architecture"`
-	Quantization string `json:"quantization"`
-	ChatTemplate string `json:"chat_template,omitempty"`
-	WeightMiB    int64  `json:"weight_mib"`
-	Layers       int    `json:"layers"`
-	ContextLimit int    `json:"context_limit"`
+	TokenizerRevision       string `json:"tokenizer_revision,omitempty"`
+	BlockMiB                int64  `json:"block_mib,omitempty"`
+	LoadRAMMiB              int64  `json:"load_ram_mib,omitempty"`
+	KVBytesPerTokenPerLayer int64  `json:"kv_bytes_per_token_per_layer,omitempty"`
+	ID                      string `json:"id"`
+	Name                    string `json:"name"`
+	Format                  string `json:"format"`
+	File                    string `json:"file"`
+	Revision                string `json:"revision"`
+	SHA256                  string `json:"sha256"`
+	Architecture            string `json:"architecture"`
+	Quantization            string `json:"quantization"`
+	ChatTemplate            string `json:"chat_template,omitempty"`
+	WeightMiB               int64  `json:"weight_mib"`
+	Layers                  int    `json:"layers"`
+	ContextLimit            int    `json:"context_limit"`
 }
 
 func validCatalogID(id string) bool {
@@ -51,11 +55,16 @@ func (c *Controller) RegisterArtifact(a ModelArtifact) (ModelArtifact, error) {
 	if !validCatalogID(a.ID) || a.Name == "" || len(a.Name) > 120 {
 		return a, fmt.Errorf("artifact id and name are required")
 	}
-	if a.Format != "gguf" {
-		return a, fmt.Errorf("supported artifact format: gguf")
+	if a.Format != "gguf" && a.Format != "safetensors" {
+		return a, fmt.Errorf("supported artifact formats: gguf, safetensors")
 	}
-	if a.File == "" || strings.ContainsAny(a.File, "/\\:\x00") || !strings.HasSuffix(strings.ToLower(a.File), ".gguf") {
-		return a, fmt.Errorf("artifact file must be a GGUF basename")
+	if a.File == "" || strings.ContainsAny(a.File, "/\\:\x00") || a.Format == "safetensors" && !validCatalogID(a.File) || a.Format == "gguf" && !strings.HasSuffix(strings.ToLower(a.File), ".gguf") {
+		return a, fmt.Errorf("artifact file must be a model basename (GGUF file or sealed directory)")
+	}
+	if a.Format == "safetensors" {
+		if a.Architecture != "llama" || !contains([]string{"none", "int8", "nf4"}, a.Quantization) || a.TokenizerRevision == "" || len(a.TokenizerRevision) > 256 || a.BlockMiB < 1 || a.BlockMiB > 1<<20 || a.LoadRAMMiB < 1 || a.LoadRAMMiB > 1<<30 || a.KVBytesPerTokenPerLayer < 1 || a.KVBytesPerTokenPerLayer > 1<<20 {
+			return a, fmt.Errorf("sealed Llama metadata requires precision, tokenizer revision, block/RAM and KV estimates")
+		}
 	}
 	if a.Revision == "" || a.Architecture == "" || a.Quantization == "" {
 		return a, fmt.Errorf("revision, architecture and quantization are required")
@@ -97,10 +106,19 @@ func (c *Controller) resolveDeployment(s DeploymentSpec) (DeploymentSpec, error)
 		if !ok {
 			return s, fmt.Errorf("unknown model_ref %q", s.ModelRef)
 		}
+		if (s.Backend == BackendPetals) != (a.Format == "safetensors") {
+			return s, fmt.Errorf("petals requires a sealed safetensors artifact; llama backends require GGUF")
+		}
 		if s.ModelFile != "" && s.ModelFile != a.File || s.WeightMiB != 0 && s.WeightMiB != a.WeightMiB || s.Layers != 0 && s.Layers != a.Layers || s.ModelSHA256 != "" && s.ModelSHA256 != a.SHA256 {
 			return s, fmt.Errorf("deployment conflicts with immutable artifact metadata")
 		}
 		s.ModelFile, s.WeightMiB, s.Layers, s.ModelSHA256 = a.File, a.WeightMiB, a.Layers, a.SHA256
+		if s.Backend == BackendPetals {
+			if s.BlockMiB != 0 && s.BlockMiB != a.BlockMiB || s.LoadRAMMiB != 0 && s.LoadRAMMiB != a.LoadRAMMiB || s.KVBytesPerTokenPerLayer != 0 && s.KVBytesPerTokenPerLayer != a.KVBytesPerTokenPerLayer {
+				return s, fmt.Errorf("deployment conflicts with sealed memory estimates")
+			}
+			s.BlockMiB, s.LoadRAMMiB, s.KVBytesPerTokenPerLayer = a.BlockMiB, a.LoadRAMMiB, a.KVBytesPerTokenPerLayer
+		}
 		if s.ContextSize == 0 {
 			s.ContextSize = a.ContextLimit
 			if s.ContextSize > 4096 {

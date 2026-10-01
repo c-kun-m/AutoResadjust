@@ -34,7 +34,7 @@ func (c *Controller) Save(path string) error {
 	defer c.mu.Unlock()
 	c.Nodes.mu.RLock()
 	defer c.Nodes.mu.RUnlock()
-	data, err := json.Marshal(snapshot{Version: 4, Nodes: c.Nodes.nodes, Tasks: c.Nodes.tasks, Allocations: c.Nodes.allocations, Blocked: c.Nodes.blocked, Keys: c.keys, Deployments: c.deployments, DeploymentKeys: c.deploymentKeys, Artifacts: c.artifacts, NetworkGroups: c.networkGroups, NetworkLinks: c.networkLinks, ModelPools: c.modelPools})
+	data, err := json.Marshal(snapshot{Version: 5, Nodes: c.Nodes.nodes, Tasks: c.Nodes.tasks, Allocations: c.Nodes.allocations, Blocked: c.Nodes.blocked, Keys: c.keys, Deployments: c.deployments, DeploymentKeys: c.deploymentKeys, Artifacts: c.artifacts, NetworkGroups: c.networkGroups, NetworkLinks: c.networkLinks, ModelPools: c.modelPools})
 	if err != nil {
 		return err
 	}
@@ -81,7 +81,7 @@ func LoadController(path string) (*Controller, error) {
 	if err = json.Unmarshal(data, &s); err != nil {
 		return nil, err
 	}
-	if s.Version < 1 || s.Version > 4 {
+	if s.Version < 1 || s.Version > 5 {
 		return nil, fmt.Errorf("unsupported state version %d", s.Version)
 	}
 	if s.Nodes != nil {

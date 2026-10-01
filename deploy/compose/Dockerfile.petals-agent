@@ -1,0 +1,12 @@
+ARG PETALS_BASE_IMAGE=compute-platform-petals-compat:local
+FROM golang:1.22-alpine AS agent-build
+WORKDIR /src
+COPY go.mod ./
+COPY internal ./internal
+COPY cmd ./cmd
+RUN CGO_ENABLED=0 go build -trimpath -o /out/edge-agent ./cmd/edge-agent
+
+FROM ${PETALS_BASE_IMAGE}
+COPY --from=agent-build /out/edge-agent /usr/local/bin/edge-agent
+ENV NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENTRYPOINT ["python", "-m", "petals_backend.agent_entrypoint"]

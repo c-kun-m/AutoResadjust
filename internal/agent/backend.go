@@ -59,6 +59,8 @@ func selectBackend(kind string) (Backend, error) {
 		return llamaBackend{}, nil
 	case platform.BackendLocal:
 		return llamaBackend{local: true}, nil
+	case platform.BackendPetals:
+		return petalsBackend{}, nil
 	default:
 		return nil, fmt.Errorf("backend %q is not enabled on this agent", kind)
 	}
@@ -66,6 +68,9 @@ func selectBackend(kind string) (Backend, error) {
 
 func (e *Executor) Capabilities() []string {
 	out := []string{}
+	if e.cfg.PetalsPython != "" && e.cfg.PetalsIdentity != "" && e.cfg.PetalsStateDir != "" && platform.ValidatePetalsEndpoint(e.cfg.PetalsEndpoint) == nil {
+		out = append(out, platform.BackendPetals)
+	}
 	if e.cfg.ServerBinary != "" {
 		out = append(out, platform.BackendLocal)
 		if e.cfg.RPCBinary != "" {

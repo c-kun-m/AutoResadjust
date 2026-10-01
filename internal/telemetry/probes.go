@@ -17,6 +17,7 @@ import (
 )
 
 type ProbeTarget struct {
+	TrafficURL     string `json:"traffic_url,omitempty"`
 	ID             string `json:"id"`
 	Name           string `json:"name"`
 	URL            string `json:"url"`
@@ -45,6 +46,12 @@ func (r *Registry) StartProbes(ctx context.Context, path string) error {
 		u, err := url.Parse(t.URL)
 		if err != nil || u.Host == "" || !containsScheme(u.Scheme) {
 			return fmt.Errorf("invalid probe URL for %s", t.ID)
+		}
+		if t.TrafficURL != "" {
+			v, e := url.Parse(t.TrafficURL)
+			if e != nil || v.Host == "" || (v.Scheme != "http" && v.Scheme != "https") {
+				return fmt.Errorf("invalid traffic exporter URL for %s", t.ID)
+			}
 		}
 		r.Expect(Service{ID: "infra/" + t.ID, Name: t.Name, Kind: "infrastructure", Address: t.URL, Status: "starting"})
 	}
@@ -111,6 +118,28 @@ func (r *Registry) StartProbes(ctx context.Context, path string) error {
 					s.Traffic = true
 					s.RX, s.TX = values[0], values[1]
 					s.Message += "; traffic source: cAdvisor container network"
+				}
+				if t.TrafficURL != "" {
+					// A service-specific exporter may expose its own container NIC
+					// counters when cAdvisor is on another physical host.
+					req, _ := http.NewRequestWithContext(ctx, "GET", t.TrafficURL, nil)
+					resp, fetchErr := client.Do(req)
+					if resp != nil {
+						var remote struct {
+							Source   string  `json:"traffic_source"`
+							Instance string  `json:"instance"`
+							RX       *uint64 `json:"receive_bytes_total"`
+							TX       *uint64 `json:"transmit_bytes_total"`
+						}
+						decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 65536)).Decode(&remote)
+						resp.Body.Close()
+						if fetchErr == nil && resp.StatusCode == 200 && decodeErr == nil && remote.Source == "container-network" && remote.Instance != "" && len(remote.Instance) <= 128 && remote.RX != nil && remote.TX != nil {
+							s.Traffic = true
+							s.RX, s.TX = *remote.RX, *remote.TX
+							s.Instance = id + "/" + remote.Instance
+							s.Message += "; traffic source: dedicated container network namespace"
+						}
+					}
 				}
 				r.Ingest(s)
 			}(target)

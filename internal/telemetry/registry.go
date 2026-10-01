@@ -382,6 +382,11 @@ func (r *Registry) Prometheus(w http.ResponseWriter, q *http.Request) {
 		if s.Kind == "rpc-worker" {
 			g("connection_errors_total", s.Errors)
 		}
+		if s.Kind == "petals-worker" {
+			g("inference_sessions_total", s.Requests)
+			g("inference_session_errors_total", s.Errors)
+			g("inference_session_duration_seconds_sum", s.LatencySum)
+		}
 		for k, v := range s.Engine {
 			fmt.Fprintf(w, "platform_engine_metric{%s,metric=%s} %g\n", labels, strconv.Quote(k), v)
 		}

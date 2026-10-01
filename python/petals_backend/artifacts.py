@@ -93,3 +93,12 @@ def validate_manifest(root, manifest):
         if not mapping or any(name not in files or not name.endswith(".safetensors") for name in mapping.values()):
             raise ValueError("weight index references an unverified shard")
     return manifest
+
+
+def verify_assignment_metadata(manifest, config):
+    expected = config.get("expected_metadata")
+    if expected is not None:
+        if not isinstance(expected, dict) or set(expected) != {"layers", "block_mib", "load_ram_mib", "kv_bytes_per_token_per_layer"}:
+            raise ValueError("complete scheduling metadata required")
+        if any(type(value) is not int or value < 1 or manifest.get(key) != value for key, value in expected.items()):
+            raise ValueError("sealed memory estimates differ from the platform assignment")

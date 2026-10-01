@@ -27,10 +27,12 @@ import (
 )
 
 type ExecutorConfig struct {
-	Command                                   func(context.Context, string, ...string) *exec.Cmd
-	NodeID, RPCBinary, ServerBinary, ModelDir string
-	RPCListen, RPCBackend, ModelBackend       string
-	LeaseTimeout                              time.Duration
+	PetalsPython, PetalsIdentity, PetalsStateDir, PetalsHTTP string
+	PetalsEndpoint                                           *platform.PetalsEndpoint
+	Command                                                  func(context.Context, string, ...string) *exec.Cmd
+	NodeID, RPCBinary, ServerBinary, ModelDir                string
+	RPCListen, RPCBackend, ModelBackend                      string
+	LeaseTimeout                                             time.Duration
 }
 
 type logTail struct {
@@ -78,6 +80,7 @@ func (p *child) stop() {
 }
 
 type execution struct {
+	workerReady    bool
 	warming        bool
 	warmCancel     context.CancelFunc
 	preparing      bool
@@ -127,7 +130,14 @@ func (e *Executor) launch(binary string, args, env []string) (*child, error) {
 		cancel()
 		return nil, err
 	}
-	go func() { err := cmd.Wait(); p.mu.Lock(); p.err = err; p.mu.Unlock(); close(p.done) }()
+	go func() {
+		err := cmd.Wait()
+		cleanupChild(cmd)
+		p.mu.Lock()
+		p.err = err
+		p.mu.Unlock()
+		close(p.done)
+	}()
 	return p, nil
 }
 
@@ -168,8 +178,13 @@ func (e *Executor) Apply(work []platform.WorkAssignment) error {
 	}
 	if e.current == nil {
 		rpcID, modelID := serviceIDs(e.cfg.NodeID, w.DeploymentID)
+		if backend.Kind() == platform.BackendPetals {
+			rpcID = e.cfg.NodeID + "/petals/" + w.DeploymentID
+		}
 		e.current = &execution{backend: backend, work: w, rpcID: rpcID, modelID: modelID, report: platform.WorkerReport{DeploymentID: w.DeploymentID, NodeID: e.cfg.NodeID, Token: w.Token, RPCState: "starting"}}
-		if backend.Kind() != platform.BackendLocal {
+		if backend.Kind() == platform.BackendPetals {
+			e.metrics.Register(telemetry.Service{ID: rpcID, Name: "Petals model blocks", Kind: "petals-worker", NodeID: e.cfg.NodeID, DeploymentID: w.DeploymentID, Traffic: true})
+		} else if backend.Kind() != platform.BackendLocal {
 			e.metrics.Register(telemetry.Service{ID: rpcID, Name: "GPU RPC worker", Kind: "rpc-worker", NodeID: e.cfg.NodeID, DeploymentID: w.DeploymentID, Address: w.Placement.RPCAddress, Traffic: true})
 		} else {
 			e.current.report.RPCState = "ready"
@@ -203,13 +218,15 @@ func (e *Executor) Apply(work []platform.WorkAssignment) error {
 			e.failLocked(err.Error())
 			return nil
 		}
-		listener, err := net.Listen("tcp", e.cfg.RPCListen)
-		if err != nil {
-			e.failLocked(err.Error())
-			return nil
+		if backend.Kind() == platform.BackendRPC {
+			listener, err := net.Listen("tcp", e.cfg.RPCListen)
+			if err != nil {
+				e.failLocked(err.Error())
+				return nil
+			}
+			x.proxyStop = make(chan struct{})
+			go e.metrics.ServeTCP(listener, e.cfg.RPCBackend, x.rpcID, x.proxyStop)
 		}
-		x.proxyStop = make(chan struct{})
-		go e.metrics.ServeTCP(listener, e.cfg.RPCBackend, x.rpcID, x.proxyStop)
 	}
 	if w.StartModel && x.model == nil && !x.preparing && x.report.RPCState == "ready" {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -413,7 +430,12 @@ func (e *Executor) Tick() {
 			e.failLocked(fmt.Sprintf("RPC process exited: %v; %s", err, x.rpc.logs.Text()))
 			return
 		}
-		if x.report.RPCState != "ready" {
+		if x.backend.Kind() == platform.BackendPetals {
+			e.tickPetalsWorker(x)
+			if x.finished {
+				return
+			}
+		} else if x.report.RPCState != "ready" {
 			conn, err := net.DialTimeout("tcp", e.cfg.RPCBackend, 300*time.Millisecond)
 			if err == nil {
 				conn.Close()
@@ -524,11 +546,11 @@ func (e *Executor) collectEngine(id string) {
 	sc := bufio.NewScanner(io.LimitReader(resp.Body, 128*1024))
 	for sc.Scan() {
 		parts := strings.Fields(sc.Text())
-		if len(parts) != 2 || !strings.HasPrefix(parts[0], "llamacpp:") || strings.Contains(parts[0], "{") {
+		if len(parts) != 2 || (!strings.HasPrefix(parts[0], "llamacpp:") && !strings.HasPrefix(parts[0], "petals:")) || strings.Contains(parts[0], "{") {
 			continue
 		}
 		if v, err := strconv.ParseFloat(parts[1], 64); err == nil && !math.IsNaN(v) && !math.IsInf(v, 0) {
-			values[strings.TrimPrefix(parts[0], "llamacpp:")] = v
+			values[strings.TrimPrefix(strings.TrimPrefix(parts[0], "llamacpp:"), "petals:")] = v
 		}
 	}
 	e.metrics.Update(id, func(s *telemetry.Service) { s.Engine = values })
@@ -569,7 +591,7 @@ func (e *Executor) ServeInference(w http.ResponseWriter, r *http.Request) {
 		token = x.work.Token
 		dep = x.work.DeploymentID
 	}
-	ready := x != nil && !x.finished && !x.draining && x.report.ModelState == "ready"
+	ready := x != nil && !x.finished && !x.draining && x.report.ModelState == "ready" && x.report.RPCState == "ready"
 	e.mu.Unlock()
 	if !ready || r.Header.Get("X-Assignment-Token") != token || r.Header.Get("X-Deployment-ID") != dep {
 		http.Error(w, "model is not ready or assignment is stale", http.StatusServiceUnavailable)

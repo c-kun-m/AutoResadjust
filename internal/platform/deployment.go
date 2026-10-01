@@ -11,46 +11,53 @@ import (
 )
 
 type AgentEndpoint struct {
-	NetworkProbe  bool     `json:"network_probe,omitempty"`
-	Backends      []string `json:"backends,omitempty"`
-	URL           string   `json:"url"`
-	RPCAddress    string   `json:"rpc_address"`
-	EngineVersion string   `json:"engine_version"`
-	NetworkGroup  string   `json:"network_group"`
+	Petals        *PetalsEndpoint `json:"petals,omitempty"`
+	NetworkProbe  bool            `json:"network_probe,omitempty"`
+	Backends      []string        `json:"backends,omitempty"`
+	URL           string          `json:"url"`
+	RPCAddress    string          `json:"rpc_address"`
+	EngineVersion string          `json:"engine_version"`
+	NetworkGroup  string          `json:"network_group"`
 }
 
 type DeploymentSpec struct {
-	Backend        string   `json:"backend,omitempty"`
-	ModelRef       string   `json:"model_ref,omitempty"`
-	Layers         int      `json:"layers,omitempty"`
-	GPULayers      int      `json:"gpu_layers,omitempty"`
-	RAMMiB         int64    `json:"ram_mib,omitempty"`
-	HostReserveMiB int64    `json:"host_reserve_mib,omitempty"`
-	ModelSHA256    string   `json:"model_sha256,omitempty"`
-	Name           string   `json:"name"`
-	ModelFile      string   `json:"model_file"`
-	WeightMiB      int64    `json:"weight_mib"`
-	ReserveMiB     int64    `json:"reserve_mib"`
-	KVCacheMiB     int64    `json:"kv_cache_mib"`
-	ContextSize    int      `json:"context_size"`
-	MinNodes       int      `json:"min_nodes"`
-	MaxNodes       int      `json:"max_nodes"`
-	NetworkGroup   string   `json:"network_group"`
-	NodeIDs        []string `json:"node_ids,omitempty"`
-	CoordinatorID  string   `json:"coordinator_id,omitempty"`
-	IdempotencyKey string   `json:"idempotency_key,omitempty"`
+	BlockMiB                int64    `json:"block_mib,omitempty"`
+	LoadRAMMiB              int64    `json:"load_ram_mib,omitempty"`
+	KVBytesPerTokenPerLayer int64    `json:"kv_bytes_per_token_per_layer,omitempty"`
+	Backend                 string   `json:"backend,omitempty"`
+	ModelRef                string   `json:"model_ref,omitempty"`
+	Layers                  int      `json:"layers,omitempty"`
+	GPULayers               int      `json:"gpu_layers,omitempty"`
+	RAMMiB                  int64    `json:"ram_mib,omitempty"`
+	HostReserveMiB          int64    `json:"host_reserve_mib,omitempty"`
+	ModelSHA256             string   `json:"model_sha256,omitempty"`
+	Name                    string   `json:"name"`
+	ModelFile               string   `json:"model_file"`
+	WeightMiB               int64    `json:"weight_mib"`
+	ReserveMiB              int64    `json:"reserve_mib"`
+	KVCacheMiB              int64    `json:"kv_cache_mib"`
+	ContextSize             int      `json:"context_size"`
+	MinNodes                int      `json:"min_nodes"`
+	MaxNodes                int      `json:"max_nodes"`
+	NetworkGroup            string   `json:"network_group"`
+	NodeIDs                 []string `json:"node_ids,omitempty"`
+	CoordinatorID           string   `json:"coordinator_id,omitempty"`
+	IdempotencyKey          string   `json:"idempotency_key,omitempty"`
 }
 
 type Placement struct {
-	RAMMiB         int64   `json:"ram_mib,omitempty"`
-	NodeID         string  `json:"node_id"`
-	GPUID          string  `json:"gpu_id"`
-	AgentURL       string  `json:"agent_url"`
-	RPCAddress     string  `json:"rpc_address"`
-	UsableMiB      int64   `json:"usable_mib"`
-	WeightShareMiB int64   `json:"weight_share_mib"`
-	Fraction       float64 `json:"fraction"`
-	Coordinator    bool    `json:"coordinator"`
+	Petals         *PetalsEndpoint `json:"petals,omitempty"`
+	StartBlock     int             `json:"start_block,omitempty"`
+	EndBlock       int             `json:"end_block,omitempty"`
+	RAMMiB         int64           `json:"ram_mib,omitempty"`
+	NodeID         string          `json:"node_id"`
+	GPUID          string          `json:"gpu_id"`
+	AgentURL       string          `json:"agent_url"`
+	RPCAddress     string          `json:"rpc_address"`
+	UsableMiB      int64           `json:"usable_mib"`
+	WeightShareMiB int64           `json:"weight_share_mib"`
+	Fraction       float64         `json:"fraction"`
+	Coordinator    bool            `json:"coordinator"`
 }
 
 type DeploymentPlan struct {
@@ -98,14 +105,14 @@ func normalizeDeployment(s DeploymentSpec) (DeploymentSpec, error) {
 	if s.Backend == "" {
 		s.Backend = BackendRPC
 	}
-	if s.Backend != BackendRPC && s.Backend != BackendLocal {
+	if s.Backend != BackendRPC && s.Backend != BackendLocal && s.Backend != BackendPetals {
 		return s, fmt.Errorf("unsupported backend %q", s.Backend)
 	}
 	s.Name = strings.TrimSpace(s.Name)
 	if s.Name == "" || len(s.Name) > 120 {
 		return s, fmt.Errorf("name is required (max 120 characters)")
 	}
-	if s.ModelFile == "" || strings.ContainsAny(s.ModelFile, "/\\:\x00") || !strings.HasSuffix(strings.ToLower(s.ModelFile), ".gguf") {
+	if s.ModelFile == "" || strings.ContainsAny(s.ModelFile, "/\\:\x00") || s.Backend != BackendPetals && !strings.HasSuffix(strings.ToLower(s.ModelFile), ".gguf") {
 		return s, fmt.Errorf("model_file must be a GGUF filename inside the agent model directory")
 	}
 	if s.WeightMiB <= 0 || s.WeightMiB > 1<<30 {
@@ -125,6 +132,17 @@ func normalizeDeployment(s DeploymentSpec) (DeploymentSpec, error) {
 	}
 	if s.ContextSize < 128 || s.ContextSize > 131072 {
 		return s, fmt.Errorf("context_size must be 128..131072")
+	}
+	if s.Backend == BackendPetals {
+		if s.ModelRef == "" || s.ModelSHA256 == "" || !validCatalogID(s.ModelFile) || s.Layers < 1 || s.Layers > 1024 || s.BlockMiB < 1 || s.LoadRAMMiB < 1 || s.KVBytesPerTokenPerLayer < 1 {
+			return s, fmt.Errorf("petals requires an immutable sealed model_ref")
+		}
+		if s.HostReserveMiB == 0 {
+			s.HostReserveMiB = 4096
+		}
+		if s.HostReserveMiB < 0 || s.HostReserveMiB > 1<<30 {
+			return s, fmt.Errorf("invalid host reserve")
+		}
 	}
 	if s.Backend == BackendLocal {
 		if s.MinNodes == 0 {
@@ -198,6 +216,9 @@ func (c *Controller) PlanDeployment(spec DeploymentSpec) (DeploymentPlan, error)
 func (c *Controller) planDeployment(s DeploymentSpec) (DeploymentPlan, error) {
 	if s.Backend == BackendLocal {
 		return c.planLocalDeployment(s)
+	}
+	if s.Backend == BackendPetals {
+		return c.planPetalsDeployment(s)
 	}
 	plan := DeploymentPlan{Placements: []Placement{}, Rejections: map[string][]string{}, Warning: "Capacity estimate only: layer rounding, actual KV cache and workspace must pass engine load and warmup. One NVIDIA GPU per node; selected nodes are exclusive. RPC requires a trusted private network."}
 	if _, ok := c.networkGroups[s.NetworkGroup]; !ok {
@@ -369,6 +390,9 @@ func (c *Controller) placeDeployment(d *Deployment) {
 	if d.Spec.Backend == BackendLocal {
 		d.Message = "GPU and host RAM reserved; preparing local model"
 	}
+	if d.Spec.Backend == BackendPetals {
+		d.Message = "GPU and host RAM reserved; verifying and loading assigned Petals blocks"
+	}
 }
 
 func (c *Controller) ListDeployments() []Deployment {
@@ -433,7 +457,7 @@ func (c *Controller) ReportWorkers(node string, reports []WorkerReport) error {
 		if d.Phase == "stopped" || d.Phase == "failed" {
 			continue
 		}
-		if !contains([]string{"starting", "ready", "failed", "stopped"}, r.RPCState) || !contains([]string{"", "starting", "ready", "degraded", "failed", "stopped"}, r.ModelState) {
+		if !contains([]string{"starting", "ready", "degraded", "failed", "stopped"}, r.RPCState) || !contains([]string{"", "starting", "ready", "degraded", "failed", "stopped"}, r.ModelState) {
 			return fmt.Errorf("invalid worker state")
 		}
 		r.ObservedAt = c.now().UTC()
@@ -480,8 +504,9 @@ func (c *Controller) ReconcileDeployments() {
 			}
 			if p.Coordinator {
 				modelReady = fresh && r.ModelState == "ready"
-				unhealthy = r.ModelState == "degraded"
+				unhealthy = unhealthy || r.ModelState == "degraded"
 			}
+			unhealthy = unhealthy || r.RPCState == "degraded"
 			if !ok || r.RPCState != "stopped" || (p.Coordinator && r.ModelState != "stopped") {
 				allStopped = false
 			}
@@ -511,6 +536,9 @@ func (c *Controller) ReconcileDeployments() {
 			d.Message = "RPC workers ready; loading and warming model"
 			if d.Spec.Backend == BackendLocal {
 				d.Message = "loading and warming local GPU/RAM model"
+			}
+			if d.Spec.Backend == BackendPetals {
+				d.Message = "assigned blocks ready; loading private gateway and warming complete model"
 			}
 		} else {
 			d.Phase = "starting"

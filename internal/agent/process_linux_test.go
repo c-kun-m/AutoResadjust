@@ -9,8 +9,11 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/resource-adjust/compute-platform/internal/telemetry"
 )
 
 func TestProcessGroupHelper(t *testing.T) {
@@ -18,13 +21,16 @@ func TestProcessGroupHelper(t *testing.T) {
 	if mode == "" {
 		return
 	}
-	if mode == "parent" {
+	if mode == "parent" || mode == "parent-exits" {
 		child := exec.Command(os.Args[0], "-test.run=^TestProcessGroupHelper$")
 		child.Env = append(os.Environ(), "PLATFORM_TEST_PROCESS_TREE=child")
 		child.Stdout = os.Stdout
 		child.Stderr = os.Stderr
 		if err := child.Start(); err != nil {
 			panic(err)
+		}
+		if mode == "parent-exits" {
+			os.Exit(0)
 		}
 		_ = child.Wait()
 		return
@@ -41,6 +47,43 @@ func TestProcessGroupHelper(t *testing.T) {
 		}
 		connection.Close()
 	}
+}
+
+func TestExitedParentAlsoCleansDescendants(t *testing.T) {
+	e := NewExecutor(ExecutorConfig{}, telemetry.New())
+	p, err := e.launch(os.Args[0], []string{"-test.run=^TestProcessGroupHelper$"}, []string{"PLATFORM_TEST_PROCESS_TREE=parent-exits"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.stop()
+	deadline := time.Now().Add(3 * time.Second)
+	endpoint := ""
+	for time.Now().Before(deadline) {
+		fields := strings.Fields(p.logs.Text())
+		if len(fields) > 0 {
+			endpoint = fields[0]
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if endpoint == "" {
+		t.Fatal("descendant did not publish its listener")
+	}
+	select {
+	case <-p.done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("crashed parent retained inherited pipe")
+	}
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		connection, err := net.DialTimeout("tcp", endpoint, 50*time.Millisecond)
+		if err != nil {
+			return
+		}
+		connection.Close()
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("untracked child survived its parent's exit")
 }
 
 func TestCancelTerminatesDescendantListener(t *testing.T) {

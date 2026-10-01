@@ -1,6 +1,6 @@
 # 私有 Petals 兼容性验证
 
-当前是可复现的兼容性与故障验证入口。控制面的 `petals` 后端尚未开放；不能把此镜像作为已接入租约、资源预留和服务监控的 Agent 使用。
+控制面的 `petals` 后端现已接入固定块分配、GPU/RAM/KV 预留、租约、预热、推理入口和服务监控。当前支持标准 Llama safetensors、FP16/INT8/NF4、可信私网。真实验证仍限于一张 RTX 5060 上的两个工作进程；没有完成多物理机或 13B 性能验收。
 
 ## 固定输入
 
@@ -60,8 +60,54 @@ docker run --rm --init --gpus all --network none --shm-size 1g compute-platform-
 python -m petals_backend.prepare --model-dir /models/team-model --id team-model-nf4 --name "Team model" --revision <固定模型版本> --tokenizer-revision <固定tokenizer版本> --quantization nf4
 ```
 
-要求 `config.json`、`tokenizer_config.json`、tokenizer 数据和 safetensors 权重。聊天模板使用目录内 `chat_template.jinja` 或 tokenizer 配置中的明确字符串；缺失时必须通过 `--chat-template` 提供，不能猜测聊天格式。输出的 `safetensors` 目录项用于后续平台接入，当前控制面仍只接受 GGUF。
+要求 `config.json`、`tokenizer_config.json`、tokenizer 数据和 safetensors 权重。聊天模板使用目录内 `chat_template.jinja` 或 tokenizer 配置中的明确字符串；缺失时必须通过 `--chat-template` 提供，不能猜测聊天格式。将输出 JSON 粘贴到控制台“模型目录 → 登记 Petals 封装模型”，或 POST 到 `/api/v1/model-artifacts`。
 
 清单固定模型、tokenizer、聊天模板、配置和全部权重分片的字节数及 SHA-256。运行时再次校验清单摘要和每个文件；拒绝链接、路径越界、索引指向未验证分片和未纳入清单的可替代配置。目录应以只读方式挂到运行容器。重复准备相同清单可以读取原结果，更换版本、精度或模板必须准备新目录。
 
 输出的 `block_mib` 是 Petals 参数量估计上浮 15% 后的每层 GPU 权重预算；`load_ram_mib` 覆盖两倍最大分片、FP32 嵌入/输出权重和 1 GiB 余量。这些是规划估计，仍需额外 KV/运行预算和实际加载预热，不能当作观测到的显存/内存占用。
+
+`kv_bytes_per_token_per_layer` 固定 FP16 KV 每层每 token 字节数。调度同时检查每卡权重和 KV 上限；运行时检查封装清单与调度预算一致，再核对真实架构所需 KV。所有候选节点目前都需要完整、相同的已封装目录，即使只加载其中一段模型块。推荐使用原始分片 safetensors；单个超大权重文件会产生较高加载 RAM 预算。
+
+## 启动私有集群
+
+先运行上面的固定版本构建脚本，再在项目根目录构建 Agent：
+
+```powershell
+docker build -f deploy/compose/Dockerfile.petals-agent -t compute-platform-petals-agent:local .
+```
+
+将 `.env.petals.example` 复制为不提交的 `.env.petals`，填写实际主机私网 IP、唯一物理节点 ID、模型目录、控制面地址和共享令牌。基础镜像与 Agent 镜像需在各主机准备一致版本，正式分发应使用镜像 digest。
+
+1. 在管理机器启动引导：`docker compose --env-file deploy/compose/.env.petals -f deploy/compose/docker-compose.petals.yml --profile bootstrap up -d bootstrap`。
+2. `docker compose --env-file deploy/compose/.env.petals -f deploy/compose/docker-compose.petals.yml logs bootstrap` 输出当前私有 `/ip4/.../tcp/31330/p2p/...` 地址，把它填写为每台机器的 `PETALS_INITIAL_PEERS`。引导和工作节点密钥保存在各自卷内，不复制工作节点身份给另一台机器。
+3. 在每台 GPU 机器启动：`docker compose --env-file deploy/compose/.env.petals -f deploy/compose/docker-compose.petals.yml --profile agent up -d edge-agent`。同一物理 GPU 只登记一次。保持 `init: true`；Agent 是容器的主要工作进程。
+4. 私网放通管理端控制面端口、节点 `9090` 和 `31332`、引导 `31330` 与只读监控 `31331`。默认不使用公共 DHT、外部中继、自动下载或公共测速。地址校验不替代团队 VPN/防火墙。
+5. 控制台启用实际节点，建立 **2–8 节点的已测量网络组**，完成双向测量。不同地点可显式放宽组策略，但仍需实际测量达到该策略；未测量、过期链路不能创建新的协作部署。
+6. 选择封装模型和 Petals，预览连续块、每卡估计权重与主机 RAM，再创建部署。每台先逐文件验证、测量本机计算速度和加载指定块；全部就绪后，协调节点启动网关并实际生成 1 token 才开放请求。可以将部署加入“聊天入口”。
+
+输入仅支持 `system/user/assistant` 文本消息，`n=1`、`max_tokens`（或 `max_completion_tokens`）、`temperature`、`top_p`、`stream` 和 `stream_options.include_usage`。工具、图片及其他参数会明确拒绝。每个网关只有一个会话；取消后直到生成线程和远端会话退出才释放本地额度，不能因 HTTP 已断开就并行启动下一请求。
+
+当前块列表和 Peer ID 在一次分配中固定；没有把所有互联网显存自动汇集的发现调度，也不自动迁移已开始的会话。块内部运行池可以在原节点重建，受影响请求失败；节点进程失败则按平台失败/停止确认流程释放资源。选择替代节点需要新建部署，并调整入口成员；不重放旧请求或承诺恢复丢失 KV。
+
+## 每个服务的观测
+
+- Agent、控制连接、网络探测、协调网关沿用平台监控。新增 `petals-worker`：块范围和身份验证后的状态、活动/累计会话、错误、序列化收发字节、推理步数、KV 已用/容量、CUDA 分配/保留字节。
+- 工作服务字节是推理 protobuf 载荷，不含 DHT、TCP/加密开销；其会话数也不是 token 数。`compute_tokens_per_second_per_block` 为启动时随机单块本机测试，仅作路由分数，不是端到端生成速度。实际 token 用量由生成器返回。
+- 引导 `/health` 和 `/metrics` 位于私网 `31331`；状态取实际 DHT 子进程存活，流量取专用容器网络命名空间，缺失时省略而不填 0。在管理端 `services.json` 的 `targets` 追加：
+
+```json
+{"id":"petals-bootstrap","name":"Private Petals bootstrap","url":"http://你的私网IP:31331/health","traffic_url":"http://你的私网IP:31331/health"}
+```
+
+重启控制面加载监控配置。容器网络流量与模型载荷口径不同，不能跨层相加。原始进程日志可从节点工作进程日志入口查看；长期集中采集属于后续日志工作。
+
+## 运行链路与租约测试
+
+```powershell
+docker run --rm --init --gpus all --network none --shm-size 1g --entrypoint python compute-platform-petals-compat:local -m petals_backend.runtime_smoke
+docker run --rm --init --gpus all --network none --shm-size 1g --entrypoint python compute-platform-petals-agent:local -m petals_backend.agent_smoke
+```
+
+第一项运行实际引导、两个有监控的固定块工作服务与聊天网关，验证 JSON/SSE、真实 token 计数、取消释放和中途杀死一个块后有界失败，失败尾部不能出现 `[DONE]`。
+
+第二项运行真正的 Go Agent、Python 网关和 GPU 工作进程，使用测试控制连接下发租约；另一个块仍是同 GPU 上的独立测试进程，**没有向真实控制面重复登记显卡**。断开控制连接后保持正常 45 秒租约，验证停止 GPU 子进程、拒绝新请求和恢复后的失败/停止确认。这是执行器协议验证，不能代替两台真实机器的完整调度与性能验收。

@@ -67,7 +67,8 @@ def seal(root, *, revision, tokenizer_revision, quantization, template=None):
                 "tokenizer_revision": tokenizer_revision, "quantization": quantization, "dtype": "float16",
                 "layers": int(config.num_hidden_layers), "context_limit": min(131072, int(config.max_position_embeddings)),
                 "weight_mib": math.ceil(sum(weights) / 1048576), "block_mib": block_mib,
-                "load_ram_mib": load_ram_mib, "files": files}
+                "load_ram_mib": load_ram_mib,
+                "kv_bytes_per_token_per_layer": 4 * int(config.hidden_size) // int(config.num_key_value_groups), "files": files}
     validate_manifest(root, manifest)
     # Exclusive creation protects an existing sealed model from accidental edits.
     with manifest_path.open("x") as stream:
@@ -93,7 +94,7 @@ def main():
                               quantization=args.quantization, template=args.chat_template.read_text() if args.chat_template else None)
     artifact = {"id": args.id, "name": args.name, "format": "safetensors", "file": args.model_dir.name,
                 "sha256": checksum, **{key: manifest[key] for key in (
-                    "revision", "tokenizer_revision", "architecture", "quantization", "layers", "context_limit", "weight_mib", "block_mib", "load_ram_mib")}}
+                    "revision", "tokenizer_revision", "architecture", "quantization", "layers", "context_limit", "weight_mib", "block_mib", "load_ram_mib", "kv_bytes_per_token_per_layer")}}
     print(json.dumps(artifact, indent=2))
 
 

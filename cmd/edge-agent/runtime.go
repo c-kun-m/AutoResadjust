@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -40,6 +41,13 @@ func runAgent() {
 	serverBinary := flag.String("server-binary", "", "llama-server executable")
 	modelDir := flag.String("model-dir", "models", "GGUF model directory on coordinator")
 	engineVersion := flag.String("engine-version", "", "identical pinned llama.cpp revision on all nodes")
+	petalsPython := flag.String("petals-python", "", "Python executable in the pinned private Petals image")
+	petalsIdentity := flag.String("petals-identity", "", "persistent private libp2p identity file")
+	petalsPeer := flag.String("petals-peer-id", "", "public peer ID matching that identity")
+	petalsInitial := flag.String("petals-initial-peers", "", "comma separated explicit private bootstrap multiaddresses")
+	petalsPort := flag.String("petals-port", "31332", "private Petals TCP port advertised to peers")
+	petalsHTTP := flag.String("petals-http", "127.0.0.1:18082", "local block health/metrics endpoint")
+	petalsState := flag.String("petals-state-dir", "state/petals", "private runtime configuration directory")
 	flag.Parse()
 	if *nodeID == "" || strings.ContainsAny(*nodeID, "/\\") {
 		log.Fatal("valid --node-id required")
@@ -61,7 +69,7 @@ func runAgent() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	for _, addr := range []string{*rpcBackend, *modelBackend} {
+	for _, addr := range []string{*rpcBackend, *modelBackend, *petalsHTTP} {
 		h, _, err := net.SplitHostPort(addr)
 		if err != nil || h != "127.0.0.1" {
 			log.Fatal("backend processes must bind to 127.0.0.1")
@@ -74,7 +82,18 @@ func runAgent() {
 	linkID := *nodeID + "/control-link"
 	m.Register(telemetry.Service{ID: agentID, Name: "Edge agent API", Kind: "agent", NodeID: *nodeID, Address: "http://" + net.JoinHostPort(*advertise, httpPort), Status: "ready", HTTP: true, Traffic: true})
 	m.Register(telemetry.Service{ID: linkID, Name: "Control-plane synchronization", Kind: "agent-sync", NodeID: *nodeID, Address: *control, HTTP: true, Traffic: true})
-	ex := agent.NewExecutor(agent.ExecutorConfig{NodeID: *nodeID, RPCBinary: *rpcBinary, ServerBinary: *serverBinary, ModelDir: *modelDir, RPCListen: *rpcListen, RPCBackend: *rpcBackend, ModelBackend: *modelBackend}, m)
+	var petalsEndpoint *platform.PetalsEndpoint
+	if *petalsPython != "" {
+		petalsEndpoint = &platform.PetalsEndpoint{PeerID: *petalsPeer, Address: net.JoinHostPort(*advertise, *petalsPort), InitialPeers: strings.Split(*petalsInitial, ",")}
+		if runtime.GOOS != "linux" || *rpcBinary != "" || *serverBinary != "" || *engineVersion != platform.PetalsProfile || *petalsIdentity == "" || *petalsState == "" {
+			log.Fatal("Petals requires its dedicated pinned Linux runtime, persistent identity/state and matching engine-version")
+		}
+		if err := platform.ValidatePetalsEndpoint(petalsEndpoint); err != nil {
+			log.Fatal(err)
+		}
+	}
+	ex := agent.NewExecutor(agent.ExecutorConfig{NodeID: *nodeID, RPCBinary: *rpcBinary, ServerBinary: *serverBinary, ModelDir: *modelDir, RPCListen: *rpcListen, RPCBackend: *rpcBackend, ModelBackend: *modelBackend,
+		PetalsPython: *petalsPython, PetalsIdentity: *petalsIdentity, PetalsEndpoint: petalsEndpoint, PetalsStateDir: *petalsState, PetalsHTTP: *petalsHTTP}, m)
 	if ex.Enabled() && *engineVersion == "" {
 		log.Fatal("--engine-version must identify the pinned binaries")
 	}
@@ -151,7 +170,7 @@ func runAgent() {
 			node.Health = platform.NodeReady
 			node.SchedulingEnabled = true
 		}
-		node.Agent = &platform.AgentEndpoint{URL: "http://" + net.JoinHostPort(*advertise, httpPort), RPCAddress: net.JoinHostPort(*advertise, rpcPort), EngineVersion: *engineVersion, NetworkGroup: *network, Backends: ex.Capabilities(), NetworkProbe: true}
+		node.Agent = &platform.AgentEndpoint{URL: "http://" + net.JoinHostPort(*advertise, httpPort), RPCAddress: net.JoinHostPort(*advertise, rpcPort), EngineVersion: *engineVersion, NetworkGroup: *network, Backends: ex.Capabilities(), NetworkProbe: true, Petals: petalsEndpoint}
 		networkReports := networkProbe.Reports()
 		payload := map[string]any{"node": node, "reports": ex.Reports(), "services": m.List(false), "network_results": networkReports}
 		body, err := json.Marshal(payload)

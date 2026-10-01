@@ -1,0 +1,74 @@
+name: compute-platform-petals
+services:
+  bootstrap:
+    image: ${PETALS_RUNTIME_IMAGE:-compute-platform-petals-compat:local}
+    profiles: [bootstrap]
+    init: true
+    entrypoint: [python, -m, petals_backend.bootstrap]
+    command:
+      - --identity
+      - /state/bootstrap.key
+      - --advertise-ip
+      - ${BOOTSTRAP_HOST:?private bootstrap host IP required}
+      - --port
+      - "31330"
+      - --monitor-host
+      - 0.0.0.0
+    ports:
+      - "${BOOTSTRAP_HOST}:31330:31330"
+      - "${BOOTSTRAP_HOST}:31331:31331"
+    volumes:
+      - bootstrap-identity:/state
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:31331/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 20s
+
+  edge-agent:
+    image: ${PETALS_AGENT_IMAGE:-compute-platform-petals-agent:local}
+    profiles: [agent]
+    init: true
+    gpus: all
+    shm_size: 1gb
+    environment:
+      CONTROL_PLANE_TOKEN: ${CONTROL_PLANE_TOKEN:?shared control-plane token required}
+      PETALS_INITIAL_PEERS: ${PETALS_INITIAL_PEERS:-}
+    command:
+      - --node-id
+      - ${NODE_ID:?unique physical node ID required}
+      - --node-name
+      - ${NODE_NAME:-${NODE_ID}}
+      - --site
+      - ${SITE:-private-team}
+      - --control-plane
+      - ${CONTROL_PLANE_URL:?control-plane URL required}
+      - --listen
+      - 0.0.0.0:9090
+      - --advertise-host
+      - ${NODE_HOST:?private IP reachable by all peers required}
+      - --network-group
+      - ${NETWORK_GROUP:-private-team}
+      - --model-dir
+      - /models
+    ports:
+      - "${NODE_HOST}:9090:9090"
+      - "${NODE_HOST}:31332:31332"
+    volumes:
+      - ${MODEL_DIR:?absolute directory containing sealed model directories required}:/models:ro
+      - worker-identity:/state/petals
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9090/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 40s
+
+volumes:
+  bootstrap-identity:
+  worker-identity:

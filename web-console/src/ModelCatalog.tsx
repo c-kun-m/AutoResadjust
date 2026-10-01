@@ -5,6 +5,16 @@ import { Artifact } from "./types";
 export default function ModelCatalog({ artifacts, reload }: { artifacts: Artifact[]; reload: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [sealed, setSealed] = useState("");
+  const importSealed = async (e: FormEvent) => {
+    e.preventDefault(); setBusy(true); setError("");
+    try {
+      const artifact = JSON.parse(sealed) as Artifact;
+      if (artifact.format !== "safetensors") throw new Error("请粘贴模型封装工具输出的 safetensors 目录项。");
+      await api("/v1/model-artifacts", { method: "POST", body: JSON.stringify(artifact) });
+      await reload(); setSealed("");
+    } catch (e) { setError(String(e)); } finally { setBusy(false); }
+  };
   const [form, setForm] = useState({ id: "", name: "", file: "", revision: "", sha256: "", architecture: "llama", quantization: "", weight: "", layers: "", context_limit: 2048 });
   const patch = (key: string, value: string | number) => setForm(f => ({ ...f, [key]: value }));
   const submit = async (e: FormEvent) => {
@@ -24,5 +34,6 @@ export default function ModelCatalog({ artifacts, reload }: { artifacts: Artifac
       <p className="panel-note">更换权重或量化方式时使用新的标识，已登记版本不能覆盖。</p>
       {error && <div className="error-banner" role="alert">{error}</div>}<button className="primary" disabled={busy}>{busy ? "登记中…" : "登记模型"}</button>
     </form></details>
+    <details><summary>登记 Petals 封装模型</summary><form onSubmit={importSealed} className="catalog-form"><p className="panel-note">粘贴离线封装工具输出的目录 JSON，包含权重、tokenizer、聊天模板清单摘要，以及 GPU/RAM/KV 预算。登记不会下载模型。</p><label>封装目录 JSON<textarea required rows={9} value={sealed} onChange={e => setSealed(e.target.value)} /></label>{error && <div className="error-banner" role="alert">{error}</div>}<button className="primary" disabled={busy || !sealed.trim()}>登记封装模型</button></form></details>
   </section>;
 }

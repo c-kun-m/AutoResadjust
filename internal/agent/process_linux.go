@@ -27,3 +27,11 @@ func configureChild(cmd *exec.Cmd) {
 	// Bound inherited stdout/stderr pipes if a descendant detached itself.
 	cmd.WaitDelay = 5 * time.Second
 }
+
+// Context cancellation may no longer invoke cmd.Cancel after Wait returns.
+// A Python parent that crashes can still leave living members of its group.
+func cleanupChild(cmd *exec.Cmd) {
+	if cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+}
