@@ -1,0 +1,27 @@
+name: compute-platform-agent
+
+# Run this file once on each physical GPU host. Keep NODE_ID unique per host;
+# do not start this file three times on one machine to represent three nodes.
+services:
+  edge-agent:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile.edge-agent
+    environment:
+      NODE_ID: ${NODE_ID:?set NODE_ID to the stable physical-host id}
+      SITE: ${SITE:?set SITE to the data-center/site id}
+      CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:?set CONTROL_PLANE_URL to the control-plane URL}
+      CONTROL_PLANE_TOKEN: ${CONTROL_PLANE_TOKEN:-}
+    command:
+      - "--node-id"
+      - "${NODE_ID}"
+      - "--node-name"
+      - "${NODE_NAME:-${NODE_ID}}"
+      - "--site"
+      - "${SITE}"
+      - "--control-plane"
+      - "${CONTROL_PLANE_URL}"
+    gpus: all
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

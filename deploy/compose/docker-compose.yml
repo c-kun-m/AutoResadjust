@@ -1,0 +1,151 @@
+name: compute-platform
+
+# This file runs the control plane on the management host. GPU agents are
+# deliberately kept in docker-compose.agent.yml so one physical host cannot
+# accidentally register three copies of the same machine.
+services:
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      CONTROL_PLANE_ADDR: ":8080"
+      CONTROL_PLANE_TOKEN: ${CONTROL_PLANE_TOKEN:-}
+      WEB_DIR: "/web"
+      STATE_FILE: "/data/control-plane.json"
+      SERVICES_CONFIG: "/config/services.json"
+      MONITOR_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-compute-platform}
+    ports:
+      # Keep the unauthenticated development endpoint local by default. Set
+      # CONTROL_PLANE_BIND to an explicit LAN address only after adding TLS,
+      # authentication, and a firewall rule for remote agents.
+      - "${CONTROL_PLANE_BIND:-127.0.0.1}:8080:8080"
+    volumes:
+      - ../../web-console/dist:/web:ro
+      - control-plane-data:/data
+      - ./services.json:/config/services.json:ro
+    restart: unless-stopped
+
+  # These services are infrastructure placeholders for the production
+  # adapters. The control plane checkpoints its in-memory state to a local file;
+  # PostgreSQL/NATS/MinIO are not business dependencies yet.
+  postgres:
+    image: postgres:16-alpine
+    profiles: [infra]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-compute_platform}
+      POSTGRES_USER: ${POSTGRES_USER:-compute}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-in-local-env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_BIND:-127.0.0.1}:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-compute} -d ${POSTGRES_DB:-compute_platform}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    profiles: [infra]
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    volumes:
+      - nats-data:/data
+    ports:
+      - "${NATS_CLIENT_BIND:-127.0.0.1}:4222:4222"
+      - "${NATS_MONITOR_BIND:-127.0.0.1}:8222:8222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    profiles: [infra]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-compute}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-in-local-env}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "${MINIO_API_BIND:-127.0.0.1}:9000:9000"
+      - "${MINIO_CONSOLE_BIND:-127.0.0.1}:9001:9001"
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    profiles: [identity]
+    command: ["start-dev", "--http-port=8080"]
+    environment:
+      # KC_BOOTSTRAP_* is the supported bootstrap variable name for Keycloak 25.
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-change-me-in-local-env}
+    ports:
+      - "${KEYCLOAK_BIND:-127.0.0.1}:8081:8080"
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    profiles: [observability]
+    depends_on:
+      monitor-config:
+        condition: service_completed_successfully
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=15d"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - monitor-config:/run/monitor:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "${PROMETHEUS_BIND:-127.0.0.1}:9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    profiles: [observability]
+    ports:
+      - "${GRAFANA_BIND:-127.0.0.1}:3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+  monitor-config:
+    image: alpine:3.20
+    profiles: [observability]
+    environment:
+      CONTROL_PLANE_TOKEN: ${CONTROL_PLANE_TOKEN:-}
+    entrypoint: ["/bin/sh", "/init.sh"]
+    volumes:
+      - ./monitor-init.sh:/init.sh:ro
+      - monitor-config:/run/monitor
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:0.55.1
+    profiles: [observability]
+    privileged: true
+    command: ["--docker_only=true", "--store_container_labels=true", "--whitelisted_container_labels=com.docker.compose.service,com.docker.compose.project", "--housekeeping_interval=10s"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+    # No host port: metrics are only accessible on the Compose network.
+
+  loki:
+    image: grafana/loki:3.1.0
+    profiles: [observability]
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports:
+      - "${LOKI_BIND:-127.0.0.1}:3100:3100"
+    volumes:
+      - ./loki-config.yml:/etc/loki/local-config.yaml:ro
+
+volumes:
+  control-plane-data:
+  monitor-config:
+  postgres-data:
+  nats-data:
+  minio-data:
+  prometheus-data:
+  grafana-data:

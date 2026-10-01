@@ -1,0 +1,9 @@
+services:
+  control-plane:
+    ports: !override ["127.0.0.1:18090:8080"]
+  prometheus:
+    ports: !override ["127.0.0.1:19090:9090"]
+  grafana:
+    ports: !override ["127.0.0.1:13000:3000"]
+  loki:
+    ports: !override ["127.0.0.1:13100:3100"]

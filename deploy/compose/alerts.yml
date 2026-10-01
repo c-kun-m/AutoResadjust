@@ -1,0 +1,27 @@
+groups:
+  - name: compute-platform
+    rules:
+      - alert: ControlPlaneUnavailable
+        expr: up{job="control-plane"} == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "Control plane metrics cannot be scraped"
+      - alert: AgentHeartbeatMissing
+        expr: time() - platform_service_last_seen_seconds{kind="agent"} > 35
+        for: 15s
+        labels: { severity: critical }
+        annotations:
+          summary: "Agent {{ $labels.node }} stopped reporting"
+      - alert: InferenceErrorRateHigh
+        expr: sum by (service) (rate(platform_service_errors_total{kind="inference-gateway"}[5m])) / clamp_min(sum by (service) (rate(platform_service_requests_total{kind="inference-gateway"}[5m])), 0.001) > 0.05
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Inference errors exceed 5% for {{ $labels.service }}"
+      - alert: ServiceLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le,service) (rate(platform_service_request_duration_seconds_bucket{kind="control-plane"}[5m]))) > 1
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Control plane p95 request latency exceeds 1 second"

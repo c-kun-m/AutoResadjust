@@ -1,0 +1,45 @@
+name: compute-platform-distributed-agent
+services:
+  edge-agent:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile.distributed-agent
+      args:
+        LLAMA_CPP_REF: ${LLAMA_CPP_REF:-e6ab7c1a41054a888ada952eab4c886444c2f5ad}
+        CUDA_ARCHITECTURES: ${CUDA_ARCHITECTURES:-75;80;86;89;120}
+    environment:
+      CONTROL_PLANE_TOKEN: ${CONTROL_PLANE_TOKEN:?set a shared control-plane token}
+    command:
+      - --node-id
+      - ${NODE_ID:?unique physical node ID required}
+      - --node-name
+      - ${NODE_NAME:-${NODE_ID}}
+      - --site
+      - ${SITE:-local}
+      - --control-plane
+      - ${CONTROL_PLANE_URL:?control-plane URL required}
+      - --listen
+      - 0.0.0.0:9090
+      - --advertise-host
+      - ${NODE_HOST:?private LAN IP reachable from all nodes required}
+      - --network-group
+      - ${NETWORK_GROUP:-lan-default}
+      - --rpc-listen
+      - 0.0.0.0:50052
+      - --rpc-binary
+      - /usr/local/bin/ggml-rpc-server
+      - --server-binary
+      - /usr/local/bin/llama-server
+      - --engine-version
+      - ${LLAMA_CPP_REF:-e6ab7c1a41054a888ada952eab4c886444c2f5ad}
+      - --model-dir
+      - /models
+    ports:
+      - "${NODE_HOST}:9090:9090"
+      - "${NODE_HOST}:50052:50052"
+    volumes:
+      - ${MODEL_DIR:?absolute directory with GGUF files required}:/models:ro
+    gpus: all
+    init: true
+    stop_grace_period: 40s
+    restart: unless-stopped

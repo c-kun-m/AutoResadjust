@@ -1,0 +1,12 @@
+FROM golang:1.22-alpine AS build
+WORKDIR /src
+COPY go.mod ./
+COPY internal ./internal
+COPY cmd ./cmd
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /out/edge-agent ./cmd/edge-agent
+
+FROM nvidia/cuda:12.4.1-base-ubuntu22.04
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+COPY --from=build /out/edge-agent /edge-agent
+ENTRYPOINT ["/edge-agent"]

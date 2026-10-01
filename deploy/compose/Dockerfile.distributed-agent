@@ -1,0 +1,23 @@
+FROM golang:1.22-alpine AS agent-build
+WORKDIR /src
+COPY go.mod ./
+COPY internal ./internal
+COPY cmd ./cmd
+RUN CGO_ENABLED=0 go build -trimpath -o /out/edge-agent ./cmd/edge-agent
+
+FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS engine-build
+ARG LLAMA_CPP_REF=e6ab7c1a41054a888ada952eab4c886444c2f5ad
+ARG CUDA_ARCHITECTURES=75;80;86;89;120
+RUN apt-get update && apt-get install -y --no-install-recommends git cmake build-essential libcurl4-openssl-dev libssl-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /engine
+RUN git init && git remote add origin https://github.com/ggml-org/llama.cpp.git && git fetch --depth 1 origin ${LLAMA_CPP_REF} && git checkout FETCH_HEAD
+RUN cmake -S . -B build -DGGML_CUDA=ON -DGGML_RPC=ON -DBUILD_SHARED_LIBS=OFF -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" -DLLAMA_BUILD_TESTS=OFF \
+    && cmake --build build --config Release --target llama-server ggml-rpc-server -j 4
+
+FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libcurl4 libgomp1 libssl3 && rm -rf /var/lib/apt/lists/*
+ENV NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility GGML_RPC_NO_RDMA=1
+COPY --from=agent-build /out/edge-agent /usr/local/bin/edge-agent
+COPY --from=engine-build /engine/build/bin/llama-server /usr/local/bin/llama-server
+COPY --from=engine-build /engine/build/bin/ggml-rpc-server /usr/local/bin/ggml-rpc-server
+ENTRYPOINT ["/usr/local/bin/edge-agent"]

@@ -1,0 +1,13 @@
+{
+  "cadvisor_url": "http://cadvisor:8080/metrics",
+  "targets": [
+    {"id":"prometheus","name":"Prometheus","url":"http://prometheus:9090/-/ready","compose_service":"prometheus"},
+    {"id":"grafana","name":"Grafana","url":"http://grafana:3000/api/health","compose_service":"grafana"},
+    {"id":"loki","name":"Loki","url":"http://loki:3100/ready","compose_service":"loki"},
+    {"id":"cadvisor","name":"Container metrics","url":"http://cadvisor:8080/healthz","compose_service":"cadvisor"},
+    {"id":"postgres","name":"PostgreSQL (optional)","url":"tcp://postgres:5432","compose_service":"postgres"},
+    {"id":"nats","name":"NATS (optional)","url":"http://nats:8222/healthz","compose_service":"nats"},
+    {"id":"minio","name":"MinIO (optional)","url":"http://minio:9000/minio/health/live","compose_service":"minio"},
+    {"id":"keycloak","name":"Keycloak (optional)","url":"http://keycloak:8080/realms/master","compose_service":"keycloak"}
+  ]
+}
