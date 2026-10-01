@@ -561,7 +561,8 @@ func (c *Controller) InferenceTarget(id string) (string, error) {
 	}
 	for _, p := range d.Plan.Placements {
 		r := d.Workers[p.NodeID]
-		if c.now().Sub(r.ObservedAt) > 35*time.Second || r.RPCState != "ready" {
+		n, present := c.Nodes.GetNode(p.NodeID)
+		if !present || c.now().Sub(n.LastHeartbeat) > 35*time.Second || c.now().Sub(r.ObservedAt) > 35*time.Second || r.RPCState != "ready" || p.Coordinator && r.ModelState != "ready" {
 			return "", fmt.Errorf("worker is unavailable")
 		}
 	}

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/resource-adjust/compute-platform/internal/inference"
 	"github.com/resource-adjust/compute-platform/internal/platform"
 	"github.com/resource-adjust/compute-platform/internal/telemetry"
 )
@@ -25,6 +26,8 @@ type apiServer struct {
 	stateFile  string
 	initOnce   sync.Once
 	writeMu    sync.Mutex
+	inference  *inference.Router
+	chatClient *http.Client
 }
 
 func main() {
@@ -68,13 +71,14 @@ func main() {
 func (s *apiServer) serveAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key")
+	w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID, Retry-After")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
 	path := strings.TrimSuffix(r.URL.Path, "/")
-	if (strings.HasPrefix(path, "/api/") || path == "/metrics") && s.token != "" {
+	if (strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/v1/") || path == "/metrics") && s.token != "" {
 		want := "Bearer " + s.token
 		if r.Header.Get("Authorization") != want {
 			writeError(w, http.StatusUnauthorized, errors.New("bearer token required"))
@@ -115,7 +119,7 @@ func (s *apiServer) serveAPI(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/v1/agents/"), "/tasks")
 		writeJSON(w, http.StatusOK, s.controller.TasksForNode(id))
 	default:
-		if s.webDir != "" && r.Method == http.MethodGet && !strings.HasPrefix(path, "/api/") {
+		if s.webDir != "" && r.Method == http.MethodGet && !strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, "/v1/") {
 			http.FileServer(http.Dir(s.webDir)).ServeHTTP(w, r)
 			return
 		}

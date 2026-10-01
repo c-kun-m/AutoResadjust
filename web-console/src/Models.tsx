@@ -14,6 +14,9 @@ export default function Models({ deployments, nodes, refresh, setError, monitor 
   const [form, setForm] = useState({ name: "协同模型服务", backend: "llama_rpc", model_ref: "", model_file: "", weight: "16", reserve: "1", kv: "1", context_size: 2048, min_nodes: 2, max_nodes: 3, network_group: "lan-default", coordinator_id: "", layers: "", gpu_layers: 10, ram: "24" });
   const [prompt, setPrompt] = useState("你好，请介绍一下你自己。");
   const [answer, setAnswer] = useState("");
+	const chatAbort = useRef<AbortController | null>(null);
+	const [chatID, setChatID] = useState("");
+	useEffect(() => () => chatAbort.current?.abort(), []);
   const local = form.backend === "llama_local";
   const loadArtifacts = useCallback(async () => { setArtifacts(await api<Artifact[]>("/v1/model-artifacts")); }, []);
   useEffect(() => { void loadArtifacts().catch(e => setError(String(e))); }, [loadArtifacts, setError]);
@@ -38,8 +41,10 @@ export default function Models({ deployments, nodes, refresh, setError, monitor 
   const stop = async (id: string) => { setBusy(true); try { await api(`/v1/deployments/${encodeURIComponent(id)}/stop`, { method: "POST" }); await refresh(); } catch (e) { setError(String(e)); } finally { setBusy(false); } };
   const test = async (id: string) => {
     setBusy(true); setAnswer("");
-    try { const r = await api<{ choices?: { message?: { content?: string } }[] }>(`/v1/deployments/${id}/inference/v1/chat/completions`, { method: "POST", body: JSON.stringify({ messages: [{ role: "user", content: prompt }], max_tokens: 128, stream: false }), signal: AbortSignal.timeout(120000) }); setAnswer(r.choices?.[0]?.message?.content || JSON.stringify(r)); }
-    catch (e) { setAnswer(String(e)); } finally { setBusy(false); }
+    const controller = new AbortController(); chatAbort.current = controller; setChatID(id);
+    const timeout = setTimeout(() => controller.abort(), 125000);
+    try { const r = await api<{ choices?: { message?: { content?: string } }[] }>(`/v1/deployments/${id}/inference/v1/chat/completions`, { method: "POST", body: JSON.stringify({ messages: [{ role: "user", content: prompt }], max_tokens: 128, stream: false }), signal: controller.signal }); setAnswer(r.choices?.[0]?.message?.content || JSON.stringify(r)); }
+    catch (e) { setAnswer(controller.signal.aborted ? "请求已取消或客户端等待超时。" : String(e)); } finally { clearTimeout(timeout); chatAbort.current = null; setChatID(""); setBusy(false); }
   };
   return <><div className="page-heading"><div><p>COLLABORATIVE INFERENCE</p><h1>选择适合这些机器的部署方式</h1><span>局域网内共同承载权重，或用本机内存分担显存压力。</span></div></div>
     <div className="model-layout"><section className="panel"><div className="panel-heading"><h2>创建模型部署</h2></div>
@@ -66,7 +71,7 @@ export default function Models({ deployments, nodes, refresh, setError, monitor 
       {!deployments.length && <div className="empty-panel"><b>还没有部署</b><p>先接入并启用节点，再选择执行方式。</p></div>}
       {deployments.map(d => <article key={d.id} className="deployment-card"><div className="deployment-title"><h3>{d.spec.name}</h3><Badge status={d.phase} /></div><p>{backendNames[d.spec.backend || "llama_rpc"]} · {d.spec.model_file}</p><div className="deployment-message">{d.message}</div><div className="placement-list">{d.plan.placements?.map(p => { const worker = d.workers?.[p.node_id]; const state = worker && !["stopped", "failed"].includes(d.phase) && Date.now() - Date.parse(worker.observed_at) > 35000 ? "offline" : (d.spec.backend === "llama_local" ? worker?.model_state : worker?.rpc_state) || "starting"; return <div key={p.node_id}><span><b>{p.node_id}</b><small>GPU 权重约 {(p.weight_share_mib / 1024).toFixed(2)} GiB{p.ram_mib ? ` · RAM ${(p.ram_mib / 1024).toFixed(1)} GiB` : ""}</small></span><Badge status={state} /></div>; })}</div>
         {d.phase === "ready" && <div className="endpoint"><span>推理入口</span><code>/api/v1/deployments/{d.id}/inference/v1/chat/completions</code></div>}<div className="form-actions"><button onClick={() => monitor(d.id)}>查看服务监控</button>{!["stopped", "failed"].includes(d.phase) && <button className="danger-button" disabled={busy || d.phase === "stopping"} onClick={() => void stop(d.id)}>停止部署</button>}</div>
-        {d.phase === "ready" && <details><summary>测试推理</summary><textarea aria-label="测试提问" value={prompt} onChange={e => setPrompt(e.target.value)} /><button disabled={busy} onClick={() => void test(d.id)}>发送</button>{answer && <pre className="answer-view">{answer}</pre>}</details>}
+        {d.phase === "ready" && <details><summary>测试推理</summary><textarea aria-label="测试提问" value={prompt} onChange={e => setPrompt(e.target.value)} /><button disabled={busy} onClick={() => void test(d.id)}>发送</button>{chatID === d.id && <button onClick={() => chatAbort.current?.abort()}>取消请求</button>}{answer && <pre className="answer-view">{answer}</pre>}</details>}
       </article>)}
     </section><ModelCatalog artifacts={artifacts} reload={loadArtifacts} /></div></div>
   </>;

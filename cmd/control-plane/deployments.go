@@ -2,16 +2,14 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/resource-adjust/compute-platform/internal/inference"
 	"github.com/resource-adjust/compute-platform/internal/platform"
 	"github.com/resource-adjust/compute-platform/internal/telemetry"
 )
@@ -21,6 +19,13 @@ func (s *apiServer) initMetrics() {
 		if s.metrics == nil {
 			s.metrics = telemetry.New()
 		}
+		if s.inference == nil {
+			s.inference = inference.New(inference.DefaultPolicy())
+		}
+		if s.chatClient == nil {
+			s.chatClient = &http.Client{Transport: &http.Transport{IdleConnTimeout: 30 * time.Second, MaxIdleConns: 64, MaxIdleConnsPerHost: 4}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		}
+		s.metrics.Register(telemetry.Service{ID: "chat-router", Name: "Unified chat router", Kind: "inference-router", Status: "ready", HTTP: true, Traffic: true})
 		s.metrics.Register(telemetry.Service{ID: "control-plane", Name: "Control plane API", Kind: "control-plane", Status: "ready", HTTP: true, Traffic: true})
 		s.metrics.Register(telemetry.Service{ID: "web-console", Name: "Web console", Kind: "web-console", Status: "ready", HTTP: true, Traffic: true})
 	})
@@ -51,7 +56,7 @@ func (s *apiServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" || r.Method == "OPTIONS" || strings.Contains(r.URL.Path, "/inference/") {
+		if r.Method == "GET" || r.Method == "OPTIONS" || strings.Contains(r.URL.Path, "/inference/") || r.URL.Path == "/v1/chat/completions" || r.URL.Path == "/v1/chat/completions/" {
 			s.serveAPI(w, r)
 			return
 		}
@@ -80,13 +85,16 @@ func (s *apiServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := "control-plane"
-	if !strings.HasPrefix(r.URL.Path, "/api/") {
+	if !strings.HasPrefix(r.URL.Path, "/api/") && !strings.HasPrefix(r.URL.Path, "/v1/") {
 		id = "web-console"
 	}
 	// Inference has a dedicated service counter; do not double count its body.
 	if strings.Contains(r.URL.Path, "/inference/") {
 		handler.ServeHTTP(w, r)
 		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/v1/") {
+		id = "chat-router"
 	}
 	s.metrics.HTTP(id, handler).ServeHTTP(w, r)
 }
@@ -96,6 +104,7 @@ func (s *apiServer) expectServices() {
 		s.metrics.Expect(telemetry.Service{ID: n.ID + "/agent", Name: "Edge agent", Kind: "agent", NodeID: n.ID, Status: "starting", HTTP: true, Traffic: true})
 	}
 	for _, d := range s.controller.ListDeployments() {
+		s.inference.ObserveDeployment(d.ID)
 		s.metrics.Register(telemetry.Service{ID: "gateway/" + d.ID, Name: d.Spec.Name + " gateway", Kind: "inference-gateway", DeploymentID: d.ID, HTTP: true, Traffic: true})
 		s.metrics.State("gateway/"+d.ID, d.Phase, d.Message)
 		for _, p := range d.Plan.Placements {
@@ -110,6 +119,9 @@ func (s *apiServer) expectServices() {
 }
 
 func (s *apiServer) extendedRoute(w http.ResponseWriter, r *http.Request, path string) bool {
+	if s.chatRoute(w, r, path) {
+		return true
+	}
 	if s.networkRoute(w, r, path) {
 		return true
 	}
@@ -118,6 +130,7 @@ func (s *apiServer) extendedRoute(w http.ResponseWriter, r *http.Request, path s
 		s.expectServices()
 		s.metrics.Prometheus(w, r)
 		s.networkMetrics(w)
+		s.inferenceMetrics(w)
 		for _, n := range s.controller.Nodes.ListNodes() {
 			fresh := !n.LastHeartbeat.IsZero() && time.Since(n.LastHeartbeat) < 35*time.Second
 			if fresh && n.Host != nil {
@@ -293,53 +306,5 @@ func (s *apiServer) extendedRoute(w http.ResponseWriter, r *http.Request, path s
 }
 
 func (s *apiServer) proxyInference(w http.ResponseWriter, r *http.Request, id string) {
-	s.expectServices()
-	if _, ok := s.controller.GetDeployment(id); !ok {
-		http.NotFound(w, r)
-		return
-	}
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		target, err := s.controller.InferenceTarget(id)
-		if err != nil {
-			writeError(w, 503, err)
-			return
-		}
-		d, _ := s.controller.GetDeployment(id)
-		// Normalize the model alias to this deployment while preserving stream and
-		// sampling parameters. The bounded request body is never logged.
-		var body map[string]json.RawMessage
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeError(w, 400, err)
-			return
-		}
-		if body == nil {
-			writeError(w, 400, fmt.Errorf("JSON object required"))
-			return
-		}
-		body["model"], _ = json.Marshal(id)
-		data, _ := json.Marshal(body)
-		r.Body = io.NopCloser(bytes.NewReader(data))
-		r.ContentLength = int64(len(data))
-		u, _ := url.Parse(target)
-		proxy := httputil.NewSingleHostReverseProxy(u)
-		director := proxy.Director
-		proxy.Director = func(q *http.Request) {
-			director(q)
-			q.URL.Path = "/inference/v1/chat/completions"
-			q.URL.RawPath = ""
-			q.Header.Set("X-Deployment-ID", id)
-			q.Header.Set("X-Assignment-Token", d.Token)
-			q.Header.Del("Authorization")
-			if s.token != "" {
-				q.Header.Set("Authorization", "Bearer "+s.token)
-			}
-		}
-		proxy.FlushInterval = -1
-		proxy.Transport = &http.Transport{ResponseHeaderTimeout: 10 * time.Minute, IdleConnTimeout: 30 * time.Second}
-		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-			writeError(w, 502, fmt.Errorf("inference upstream: %w", err))
-		}
-		proxy.ServeHTTP(w, r)
-	})
-	s.metrics.HTTP("gateway/"+id, handler).ServeHTTP(w, r)
+	s.chatInference(w, r, id)
 }

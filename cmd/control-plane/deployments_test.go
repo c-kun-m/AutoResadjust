@@ -38,8 +38,9 @@ func TestAPIGroupLifecyclePersistenceAndStreamingMetrics(t *testing.T) {
 			t.Error("proxy routing/auth headers incorrect")
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: first\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"},\"finish_reason\":null}]}\n\n")
 		w.(http.Flusher).Flush()
+		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer upstream.Close()
@@ -104,7 +105,7 @@ func TestAPIGroupLifecyclePersistenceAndStreamingMetrics(t *testing.T) {
 		t.Fatal("deployment not checkpointed")
 	}
 	request("POST", "/api/v1/deployments/"+d.ID+"/stop", "", true)
-	code, _ = request("POST", "/api/v1/deployments/"+d.ID+"/inference/v1/chat/completions", `{"messages":[]}`, true)
+	code, _ = request("POST", "/api/v1/deployments/"+d.ID+"/inference/v1/chat/completions", `{"messages":[{"role":"user","content":"hi"}]}`, true)
 	if code != 503 {
 		t.Fatal("stopping service still routes", code)
 	}

@@ -1,6 +1,24 @@
 groups:
   - name: compute-platform
     rules:
+      - alert: InferenceGenerationStalled
+        expr: increase(platform_inference_first_token_timeouts_total[5m]) + increase(platform_inference_idle_timeouts_total[5m]) + increase(platform_inference_total_timeouts_total[5m]) > 0
+        for: 0s
+        labels: { severity: warning }
+        annotations:
+          summary: "Generation timeout on {{ $labels.deployment }}"
+      - alert: InferenceQueueSaturated
+        expr: increase(platform_inference_rejected_total[5m]) + increase(platform_inference_queue_timeouts_total[5m]) > 0
+        for: 0s
+        labels: { severity: warning }
+        annotations:
+          summary: "Inference capacity exceeded on {{ $labels.deployment }}"
+      - alert: InferenceStreamFailure
+        expr: increase(platform_inference_failed_total[5m]) > 0
+        for: 0s
+        labels: { severity: warning }
+        annotations:
+          summary: "Inference failed, including failures after HTTP headers, on {{ $labels.deployment }}"
       - alert: ControlPlaneUnavailable
         expr: up{job="control-plane"} == 0
         for: 30s

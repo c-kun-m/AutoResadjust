@@ -31,6 +31,7 @@ type Controller struct {
 	networkGroups  map[string]NetworkGroup
 	networkLinks   map[string]NetworkLink
 	networkProbes  map[string]NetworkProbe
+	modelPools     map[string]ModelPool
 }
 
 func NewController(store *InMemoryStore) *Controller {
@@ -43,6 +44,7 @@ func NewController(store *InMemoryStore) *Controller {
 		now:       time.Now, keys: make(map[string]string),
 		deployments: make(map[string]Deployment), deploymentKeys: make(map[string]string),
 		artifacts:     make(map[string]ModelArtifact),
+		modelPools:    make(map[string]ModelPool),
 		networkGroups: make(map[string]NetworkGroup), networkLinks: make(map[string]NetworkLink), networkProbes: make(map[string]NetworkProbe),
 	}
 }
