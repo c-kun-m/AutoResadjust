@@ -1,0 +1,17 @@
+# This compatibility image is not advertised as a schedulable Agent yet.
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime@sha256:417bd75df6365104c283ea4c1651fb3530d9eb5a4c2fafa51943cff2a94e6385
+COPY --from=petals-source / /sources/petals/
+COPY --from=hivemind-source / /sources/hivemind/
+COPY --from=multiaddr-source / /sources/multiaddr/
+COPY --from=p2pd-cache /p2pd-linux-amd64 /sources/hivemind/hivemind/hivemind_cli/p2pd
+COPY python/petals_backend/patch_sources.py python/petals_backend/requirements-profile.txt /opt/build/
+RUN --mount=type=cache,target=/root/.cache/pip python /opt/build/patch_sources.py && \
+    python -m pip install --disable-pip-version-check -r /opt/build/requirements-profile.txt && \
+    python -m pip install --no-build-isolation --no-deps /sources/multiaddr /sources/hivemind /sources/petals && \
+    python -m pip check
+COPY python/petals_backend /opt/platform/petals_backend
+ENV PYTHONPATH=/opt/platform HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+WORKDIR /opt/platform
+RUN python -m unittest petals_backend.test_network petals_backend.test_artifacts petals_backend.test_prepare && \
+    python -c "import petals, transformers, torch, bitsandbytes; assert transformers.__version__ == '4.43.1'; assert torch.__version__ == '2.8.0+cu128'; assert bitsandbytes.__version__ == '0.48.1'"
+ENTRYPOINT ["python", "-m", "petals_backend.smoke"]
