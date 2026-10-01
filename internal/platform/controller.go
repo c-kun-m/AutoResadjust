@@ -28,6 +28,9 @@ type Controller struct {
 	deployments    map[string]Deployment
 	deploymentKeys map[string]string
 	artifacts      map[string]ModelArtifact
+	networkGroups  map[string]NetworkGroup
+	networkLinks   map[string]NetworkLink
+	networkProbes  map[string]NetworkProbe
 }
 
 func NewController(store *InMemoryStore) *Controller {
@@ -39,7 +42,8 @@ func NewController(store *InMemoryStore) *Controller {
 		Scheduler: NewScheduler(store, DefaultSchedulerWeights()),
 		now:       time.Now, keys: make(map[string]string),
 		deployments: make(map[string]Deployment), deploymentKeys: make(map[string]string),
-		artifacts: make(map[string]ModelArtifact),
+		artifacts:     make(map[string]ModelArtifact),
+		networkGroups: make(map[string]NetworkGroup), networkLinks: make(map[string]NetworkLink), networkProbes: make(map[string]NetworkProbe),
 	}
 }
 

@@ -110,10 +110,14 @@ func (s *apiServer) expectServices() {
 }
 
 func (s *apiServer) extendedRoute(w http.ResponseWriter, r *http.Request, path string) bool {
+	if s.networkRoute(w, r, path) {
+		return true
+	}
 	switch {
 	case path == "/metrics" && r.Method == "GET":
 		s.expectServices()
 		s.metrics.Prometheus(w, r)
+		s.networkMetrics(w)
 		for _, n := range s.controller.Nodes.ListNodes() {
 			fresh := !n.LastHeartbeat.IsZero() && time.Since(n.LastHeartbeat) < 35*time.Second
 			if fresh && n.Host != nil {
@@ -222,15 +226,16 @@ func (s *apiServer) extendedRoute(w http.ResponseWriter, r *http.Request, path s
 	case strings.HasPrefix(path, "/api/v1/agents/") && strings.HasSuffix(path, "/sync") && r.Method == "POST":
 		nodeID := strings.TrimSuffix(strings.TrimPrefix(path, "/api/v1/agents/"), "/sync")
 		var payload struct {
-			Node     platform.ResourceNode   `json:"node"`
-			Reports  []platform.WorkerReport `json:"reports"`
-			Services []telemetry.Service     `json:"services"`
+			Node           platform.ResourceNode    `json:"node"`
+			Reports        []platform.WorkerReport  `json:"reports"`
+			Services       []telemetry.Service      `json:"services"`
+			NetworkResults []platform.NetworkResult `json:"network_results"`
 		}
 		if err := decodeJSON(r, &payload); err != nil {
 			writeError(w, 400, err)
 			return true
 		}
-		if payload.Node.ID != nodeID || nodeID == "" || strings.ContainsAny(nodeID, "/\\") || len(payload.Services) > 128 {
+		if payload.Node.ID != nodeID || nodeID == "" || strings.ContainsAny(nodeID, "/\\") || len(payload.Services) > 128 || len(payload.NetworkResults) > 32 {
 			writeError(w, 400, fmt.Errorf("invalid agent payload"))
 			return true
 		}
@@ -252,8 +257,9 @@ func (s *apiServer) extendedRoute(w http.ResponseWriter, r *http.Request, path s
 		for _, m := range payload.Services {
 			s.metrics.Ingest(m)
 		}
+		s.controller.ReportNetwork(nodeID, payload.NetworkResults)
 		s.controller.ReconcileDeployments()
-		writeJSON(w, 200, map[string]any{"assignments": s.controller.Assignments(nodeID)})
+		writeJSON(w, 200, map[string]any{"assignments": s.controller.Assignments(nodeID), "network_probes": s.controller.NetworkAssignments(nodeID)})
 		return true
 	case strings.HasPrefix(path, "/api/v1/agents/") && strings.HasSuffix(path, "/logs") && r.Method == "GET":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/v1/agents/"), "/logs")

@@ -11,6 +11,7 @@ import (
 )
 
 type AgentEndpoint struct {
+	NetworkProbe  bool     `json:"network_probe,omitempty"`
 	Backends      []string `json:"backends,omitempty"`
 	URL           string   `json:"url"`
 	RPCAddress    string   `json:"rpc_address"`
@@ -199,6 +200,9 @@ func (c *Controller) planDeployment(s DeploymentSpec) (DeploymentPlan, error) {
 		return c.planLocalDeployment(s)
 	}
 	plan := DeploymentPlan{Placements: []Placement{}, Rejections: map[string][]string{}, Warning: "Capacity estimate only: layer rounding, actual KV cache and workspace must pass engine load and warmup. One NVIDIA GPU per node; selected nodes are exclusive. RPC requires a trusted private network."}
+	if _, ok := c.networkGroups[s.NetworkGroup]; !ok {
+		plan.Warning += " Legacy group label: no measured network policy is configured."
+	}
 	var candidates []Placement
 	versions := map[string]string{}
 	nodes := c.Nodes.ListNodes()
@@ -227,7 +231,7 @@ func (c *Controller) planDeployment(s DeploymentSpec) (DeploymentPlan, error) {
 		}
 		if !validEndpoint(n.Agent) || !supportsBackend(n.Agent, BackendRPC) {
 			reasons = append(reasons, "distributed executor is not configured")
-		} else if n.Agent.NetworkGroup != s.NetworkGroup {
+		} else if !c.networkMember(s.NetworkGroup, n) {
 			reasons = append(reasons, "network group mismatch")
 		}
 		var selected GPU
@@ -271,6 +275,9 @@ func (c *Controller) planDeployment(s DeploymentSpec) (DeploymentPlan, error) {
 	}
 	// Never mix versions of the experimental RPC protocol. Try each version
 	// independently so a large incompatible node cannot hide a feasible group.
+	if _, measured := c.networkGroups[s.NetworkGroup]; measured {
+		return c.planMeasuredRPC(s, plan, candidates, versions)
+	}
 	for _, seed := range candidates {
 		if s.CoordinatorID != "" && seed.NodeID != s.CoordinatorID {
 			continue
@@ -359,6 +366,9 @@ func (c *Controller) placeDeployment(d *Deployment) {
 	}
 	d.Phase = "starting"
 	d.Message = "group reserved; waiting for RPC workers"
+	if d.Spec.Backend == BackendLocal {
+		d.Message = "GPU and host RAM reserved; preparing local model"
+	}
 }
 
 func (c *Controller) ListDeployments() []Deployment {
@@ -393,6 +403,7 @@ func (c *Controller) StopDeployment(id string) (Deployment, error) {
 	d.Message = "waiting for every worker to confirm process termination"
 	if len(d.Plan.Placements) == 0 {
 		d.Phase = "stopped"
+		d.Message = "deployment stopped; no resources were reserved"
 	}
 	d.UpdatedAt = c.now().UTC()
 	c.deployments[id] = d
@@ -482,6 +493,8 @@ func (c *Controller) ReconcileDeployments() {
 				d.Phase = "stopped"
 				if d.Failure {
 					d.Phase = "failed"
+				} else {
+					d.Message = "all processes stopped; GPU and host RAM reservations released"
 				}
 			}
 		} else if allRPC && modelReady {
@@ -496,6 +509,9 @@ func (c *Controller) ReconcileDeployments() {
 		} else if allRPC {
 			d.Phase = "loading"
 			d.Message = "RPC workers ready; loading and warming model"
+			if d.Spec.Backend == BackendLocal {
+				d.Message = "loading and warming local GPU/RAM model"
+			}
 		} else {
 			d.Phase = "starting"
 		}

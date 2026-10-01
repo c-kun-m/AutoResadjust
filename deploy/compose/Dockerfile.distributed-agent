@@ -11,7 +11,7 @@ ARG CUDA_ARCHITECTURES=75;80;86;89;120
 RUN apt-get update && apt-get install -y --no-install-recommends git cmake build-essential libcurl4-openssl-dev libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /engine
 RUN git init && git remote add origin https://github.com/ggml-org/llama.cpp.git && git fetch --depth 1 origin ${LLAMA_CPP_REF} && git checkout FETCH_HEAD
-RUN cmake -S . -B build -DGGML_CUDA=ON -DGGML_RPC=ON -DBUILD_SHARED_LIBS=OFF -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" -DLLAMA_BUILD_TESTS=OFF \
+RUN cmake -S . -B build -DGGML_CUDA=ON -DGGML_RPC=ON -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF \
     && cmake --build build --config Release --target llama-server ggml-rpc-server -j 4
 
 FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04

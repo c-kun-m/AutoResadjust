@@ -162,7 +162,7 @@ func (c *Controller) planLocalDeployment(s DeploymentSpec) (DeploymentPlan, erro
 		}
 		if !validAgentURL(n.Agent) || !supportsBackend(n.Agent, BackendLocal) {
 			reasons = append(reasons, "llama_local executor unavailable")
-		} else if n.Agent.NetworkGroup != s.NetworkGroup {
+		} else if !c.networkMember(s.NetworkGroup, n) {
 			reasons = append(reasons, "network group mismatch")
 		}
 		if n.Host == nil || n.Host.MemoryAvailableMiB-n.ReservedRAMMiB-s.HostReserveMiB < s.RAMMiB {

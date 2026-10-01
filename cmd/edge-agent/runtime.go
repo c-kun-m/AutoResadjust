@@ -80,6 +80,7 @@ func runAgent() {
 	}
 	defer ex.Close()
 	token := strings.TrimSpace(os.Getenv("CONTROL_PLANE_TOKEN"))
+	networkProbe := agent.NewNetworkProber(*nodeID, token, m)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" {
 			w.Write([]byte("ok"))
@@ -91,6 +92,10 @@ func runAgent() {
 		}
 		if r.URL.Path == "/metrics" {
 			m.Prometheus(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/network-probe/") {
+			networkProbe.ServeHTTP(w, r)
 			return
 		}
 		if r.URL.Path == "/logs" && r.Method == "GET" {
@@ -106,7 +111,7 @@ func runAgent() {
 		http.NotFound(w, r)
 	})
 	httpServer := &http.Server{Addr: *listen, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/metrics" || r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/inference/") {
+		if r.URL.Path == "/metrics" || r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/inference/") || strings.HasPrefix(r.URL.Path, "/network-probe/") {
 			handler.ServeHTTP(w, r)
 		} else {
 			m.HTTP(agentID, handler).ServeHTTP(w, r)
@@ -146,11 +151,9 @@ func runAgent() {
 			node.Health = platform.NodeReady
 			node.SchedulingEnabled = true
 		}
-		if ex.Enabled() {
-			node.Agent = &platform.AgentEndpoint{URL: "http://" + net.JoinHostPort(*advertise, httpPort), RPCAddress: net.JoinHostPort(*advertise, rpcPort), EngineVersion: *engineVersion, NetworkGroup: *network}
-			node.Agent.Backends = ex.Capabilities()
-		}
-		payload := map[string]any{"node": node, "reports": ex.Reports(), "services": m.List(false)}
+		node.Agent = &platform.AgentEndpoint{URL: "http://" + net.JoinHostPort(*advertise, httpPort), RPCAddress: net.JoinHostPort(*advertise, rpcPort), EngineVersion: *engineVersion, NetworkGroup: *network, Backends: ex.Capabilities(), NetworkProbe: true}
+		networkReports := networkProbe.Reports()
+		payload := map[string]any{"node": node, "reports": ex.Reports(), "services": m.List(false), "network_results": networkReports}
 		body, err := json.Marshal(payload)
 		if err != nil {
 			log.Print(err)
@@ -181,7 +184,8 @@ func runAgent() {
 			return
 		}
 		var desired struct {
-			Assignments []platform.WorkAssignment `json:"assignments"`
+			Assignments   []platform.WorkAssignment `json:"assignments"`
+			NetworkProbes []platform.NetworkProbe   `json:"network_probes"`
 		}
 		if err = json.Unmarshal(data, &desired); err != nil {
 			m.State(linkID, "degraded", err.Error())
@@ -191,6 +195,8 @@ func runAgent() {
 			m.State(linkID, "degraded", err.Error())
 			return
 		}
+		networkProbe.Acknowledge(networkReports)
+		networkProbe.Apply(ctx, desired.NetworkProbes)
 		m.State(linkID, "ready", "")
 	}
 	syncOnce()

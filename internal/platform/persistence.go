@@ -18,6 +18,8 @@ type snapshot struct {
 	Deployments    map[string]Deployment        `json:"deployments"`
 	DeploymentKeys map[string]string            `json:"deployment_keys"`
 	Artifacts      map[string]ModelArtifact     `json:"artifacts,omitempty"`
+	NetworkGroups  map[string]NetworkGroup      `json:"network_groups,omitempty"`
+	NetworkLinks   map[string]NetworkLink       `json:"network_links,omitempty"`
 }
 
 // Save holds the controller lock through replacement, preventing an older
@@ -31,7 +33,7 @@ func (c *Controller) Save(path string) error {
 	defer c.mu.Unlock()
 	c.Nodes.mu.RLock()
 	defer c.Nodes.mu.RUnlock()
-	data, err := json.Marshal(snapshot{Version: 2, Nodes: c.Nodes.nodes, Tasks: c.Nodes.tasks, Allocations: c.Nodes.allocations, Blocked: c.Nodes.blocked, Keys: c.keys, Deployments: c.deployments, DeploymentKeys: c.deploymentKeys, Artifacts: c.artifacts})
+	data, err := json.Marshal(snapshot{Version: 3, Nodes: c.Nodes.nodes, Tasks: c.Nodes.tasks, Allocations: c.Nodes.allocations, Blocked: c.Nodes.blocked, Keys: c.keys, Deployments: c.deployments, DeploymentKeys: c.deploymentKeys, Artifacts: c.artifacts, NetworkGroups: c.networkGroups, NetworkLinks: c.networkLinks})
 	if err != nil {
 		return err
 	}
@@ -78,7 +80,7 @@ func LoadController(path string) (*Controller, error) {
 	if err = json.Unmarshal(data, &s); err != nil {
 		return nil, err
 	}
-	if s.Version != 1 && s.Version != 2 {
+	if s.Version != 1 && s.Version != 2 && s.Version != 3 {
 		return nil, fmt.Errorf("unsupported state version %d", s.Version)
 	}
 	if s.Nodes != nil {
@@ -104,6 +106,16 @@ func LoadController(path string) (*Controller, error) {
 	}
 	if s.Artifacts != nil {
 		c.artifacts = s.Artifacts
+	}
+	if s.NetworkGroups != nil {
+		c.networkGroups = s.NetworkGroups
+	}
+	if s.NetworkLinks != nil {
+		c.networkLinks = s.NetworkLinks
+	}
+	for k, l := range c.networkLinks {
+		l.ObservedAt = time.Time{}
+		c.networkLinks[k] = l
 	}
 	for id, n := range c.Nodes.nodes {
 		n.LastHeartbeat = time.Time{}
