@@ -2,7 +2,7 @@
   "uid": "compute-services",
   "title": "算力平台 · 全服务监控",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "5s",
   "time": {
     "from": "now-1h",
@@ -43,6 +43,24 @@
           "value": "$__all"
         },
         "allValue": ".*"
+      },
+      {
+        "current": {
+          "value": "control-plane",
+          "text": "control-plane"
+        },
+        "label": "日志服务",
+        "query": "label_values({job=\"compute-platform\",project=\"$project\"},service_name)",
+        "includeAll": true,
+        "name": "log_service",
+        "multi": false,
+        "allValue": ".*",
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
+        "type": "query",
+        "refresh": 1
       }
     ]
   },
@@ -740,6 +758,79 @@
           "mode": "multi"
         }
       }
+    },
+    {
+      "id": 19,
+      "gridPos": {
+        "y": 72,
+        "w": 24,
+        "h": 8,
+        "x": 0
+      },
+      "fieldConfig": {
+        "overrides": [],
+        "defaults": {
+          "min": 0,
+          "unit": "ops"
+        }
+      },
+      "datasource": {
+        "uid": "prometheus",
+        "type": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{instance}} 投递",
+          "expr": "sum by (instance) (rate(loki_write_sent_entries_total[5m]))"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "{{instance}} 丢弃",
+          "expr": "sum by (instance) (rate(loki_write_dropped_entries_total[5m]))"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "{{instance}} 重试",
+          "expr": "sum by (instance) (rate(loki_write_batch_retries_total[5m]))"
+        }
+      ],
+      "title": "日志投递与丢弃",
+      "type": "timeseries"
+    },
+    {
+      "id": 20,
+      "gridPos": {
+        "y": 80,
+        "w": 24,
+        "h": 12,
+        "x": 0
+      },
+      "datasource": {
+        "uid": "loki",
+        "type": "loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "uid": "loki",
+            "type": "loki"
+          },
+          "queryType": "range",
+          "expr": "{job=\"compute-platform\", project=\"$project\", service_name=~\"$log_service\"}"
+        }
+      ],
+      "title": "项目日志（完整查询请打开 Explore）",
+      "options": {
+        "dedupStrategy": "none",
+        "showTime": true,
+        "showLabels": true,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      },
+      "type": "logs"
     }
   ]
 }

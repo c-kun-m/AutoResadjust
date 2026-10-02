@@ -4,6 +4,7 @@
     {"id":"prometheus","name":"Prometheus","url":"http://prometheus:9090/-/ready","compose_service":"prometheus"},
     {"id":"grafana","name":"Grafana","url":"http://grafana:3000/api/health","compose_service":"grafana"},
     {"id":"loki","name":"Loki","url":"http://loki:3100/ready","compose_service":"loki"},
+    {"id":"alloy","name":"Log collector","url":"http://alloy:12345/-/ready","compose_service":"alloy"},
     {"id":"cadvisor","name":"Container metrics","url":"http://cadvisor:8080/healthz","compose_service":"cadvisor"},
     {"id":"postgres","name":"PostgreSQL (optional)","url":"tcp://postgres:5432","compose_service":"postgres"},
     {"id":"nats","name":"NATS (optional)","url":"http://nats:8222/healthz","compose_service":"nats"},

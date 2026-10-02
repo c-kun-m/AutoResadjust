@@ -1,0 +1,23 @@
+# Optional override for either distributed-agent or petals Compose on remote
+# hosts. Set LOKI_PUSH_URL to the management host's private, firewalled endpoint.
+services:
+  alloy:
+    image: grafana/alloy:v1.20.1@sha256:2aa2099af76c0098d4af7a4d6e48f86cb66dc1a000222ad927a1c67c6542d13f
+    profiles: [logs]
+    command: [run, --server.http.listen-addr=0.0.0.0:12345, --storage.path=/var/lib/alloy/data, /etc/alloy/config.alloy]
+    environment:
+      MONITOR_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:?set COMPOSE_PROJECT_NAME to this host's Compose project}
+      LOKI_PUSH_URL: ${LOKI_PUSH_URL:?set LOKI_PUSH_URL to the private Loki /loki/api/v1/push endpoint}
+      LOG_HOST_ID: ${NODE_ID:-private-bootstrap}
+    ports:
+      - "${LOG_MONITOR_BIND:?private IP for the remote collector metrics}:12345:12345"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./alloy.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+volumes:
+  alloy-data:

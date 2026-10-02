@@ -1,0 +1,21 @@
+{
+  "endpoints": [
+    {
+      "name": "private-petals",
+      "url": "http://127.0.0.1:18090/v1/chat/completions",
+      "model": "replace-with-model-pool-id",
+      "backend": "petals",
+      "model_revision": "replace-with-pinned-model-revision",
+      "tokenizer_revision": "replace-with-pinned-tokenizer-revision",
+      "engine_version": "petals-22afba6-torch2.8-cu128-bnb0.48.1-v1",
+      "artifact_sha256": "replace-with-64-character-manifest-or-GGUF-SHA256",
+      "precision": "fp16-nf4"
+    }
+  ],
+  "cases": [
+    {
+      "id": "case-01",
+      "messages": [{"role": "user", "content": "Replace with a fixed test prompt that produces 256 actual input tokens including the chat template."}]
+    }
+  ]
+}

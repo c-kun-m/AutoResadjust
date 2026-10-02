@@ -35,22 +35,6 @@ type ExecutorConfig struct {
 	LeaseTimeout                                             time.Duration
 }
 
-type logTail struct {
-	mu   sync.Mutex
-	text string
-}
-
-func (l *logTail) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.text += string(p)
-	if len(l.text) > 32768 {
-		l.text = l.text[len(l.text)-32768:]
-	}
-	return len(p), nil
-}
-func (l *logTail) Text() string { l.mu.Lock(); defer l.mu.Unlock(); return l.text }
-
 type child struct {
 	cmd     *exec.Cmd
 	cancel  context.CancelFunc
@@ -116,6 +100,10 @@ func NewExecutor(cfg ExecutorConfig, m *telemetry.Registry) *Executor {
 func (e *Executor) Enabled() bool { return len(e.Capabilities()) > 0 }
 
 func (e *Executor) launch(binary string, args, env []string) (*child, error) {
+	return e.launchLogged(binary, args, env, &logTail{})
+}
+
+func (e *Executor) launchLogged(binary string, args, env []string, logs *logTail) (*child, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	command := e.cfg.Command
 	if command == nil {
@@ -124,7 +112,7 @@ func (e *Executor) launch(binary string, args, env []string) (*child, error) {
 	cmd := command(ctx, binary, args...)
 	cmd.Env = append(os.Environ(), env...)
 	configureChild(cmd)
-	p := &child{cmd: cmd, cancel: cancel, done: make(chan struct{}), started: time.Now(), logs: &logTail{}}
+	p := &child{cmd: cmd, cancel: cancel, done: make(chan struct{}), started: time.Now(), logs: logs}
 	cmd.Stdout, cmd.Stderr = p.logs, p.logs
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -133,6 +121,7 @@ func (e *Executor) launch(binary string, args, env []string) (*child, error) {
 	go func() {
 		err := cmd.Wait()
 		cleanupChild(cmd)
+		p.logs.Flush()
 		p.mu.Lock()
 		p.err = err
 		p.mu.Unlock()
@@ -213,7 +202,7 @@ func (e *Executor) Apply(work []platform.WorkAssignment) error {
 			return nil
 		}
 		// UUID isolation makes the selected GPU the only CUDA device in this process.
-		x.rpc, err = e.launch(command.Binary, command.Args, command.Env)
+		x.rpc, err = e.launchFor(x.rpcID, command.Binary, command.Args, command.Env)
 		if err != nil {
 			e.failLocked(err.Error())
 			return nil
@@ -247,7 +236,7 @@ func (e *Executor) Apply(work []platform.WorkAssignment) error {
 				e.failLocked(err.Error())
 				return
 			}
-			x.model, err = e.launch(command.Binary, command.Args, command.Env)
+			x.model, err = e.launchFor(x.modelID, command.Binary, command.Args, command.Env)
 			if err != nil {
 				e.failLocked(err.Error())
 			}

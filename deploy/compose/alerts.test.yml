@@ -1,0 +1,28 @@
+rule_files:
+  - alerts.yml
+evaluation_interval: 15s
+tests:
+  - interval: 15s
+    input_series:
+      - series: 'platform_service_state{service="failed-worker",kind="petals-worker",state="failed"}'
+        values: '1x4'
+      - series: 'platform_service_state{service="stopped-worker",kind="petals-worker",state="stopped"}'
+        values: '1x4'
+      - series: 'platform_service_state{service="loading-worker",kind="model-server",state="loading"}'
+        values: '1x4'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: InferenceRuntimeUnavailable
+        exp_alerts:
+          - exp_labels: {service: failed-worker, kind: petals-worker, state: failed, severity: critical}
+            exp_annotations: {summary: "Inference runtime failed-worker is failed"}
+  - interval: 15s
+    input_series:
+      - series: 'platform_service_state{service="worker",kind="petals-worker",state="failed"}'
+        values: '1 1 stale _ _'
+      - series: 'platform_service_state{service="worker",kind="petals-worker",state="stopped"}'
+        values: '_ _ 1 1 1'
+    alert_rule_test:
+      - eval_time: 45s
+        alertname: InferenceRuntimeUnavailable
+        exp_alerts: []

@@ -30,6 +30,8 @@ from .smoke import stop_worker
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/petals-agent-validation"))
+    parser.add_argument("--allocator-oom", action="store_true",
+                        help="test actual CUDA allocation failure with a 0.1%% per-process allocator budget")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="agent-", dir=args.output_dir))
@@ -128,14 +130,57 @@ def main():
                     context_size=128, kv_cache_mib=16, **{k: manifest[k] for k in ("layers", "block_mib", "load_ram_mib", "kv_bytes_per_token_per_layer")})
         assignment = dict(deployment_id=dep, token=lease, spec=spec, placement=placement, peers=[placement, other])
         env = {**os.environ, "PETALS_IDENTITY": str(node_key), "PETALS_INITIAL_PEERS": address, "CONTROL_PLANE_TOKEN": auth}
+        fault_args = []
+        if args.allocator_oom:
+            if not Path("/.dockerenv").is_file() or {p.name for p in Path("/sys/class/net").iterdir()} != {"lo"}:
+                raise RuntimeError("allocator OOM test requires an isolated --network none container")
+            # This wrapper is exclusive to the test-owned Agent. It caps this
+            # worker's allocator instead of exhausting the shared physical GPU.
+            wrapper = root / "oom-python"
+            wrapper.write_text(f"#!{sys.executable}\n" +
+                "import os, runpy, sys\n"
+                "if sys.argv[1:3] == ['-m', 'petals_backend.worker']:\n"
+                "    import torch\n"
+                "    torch.cuda.set_per_process_memory_fraction(0.001)\n"
+                "    sys.argv = sys.argv[2:]\n"
+                "    runpy.run_module('petals_backend.worker', run_name='__main__')\n"
+                "else:\n"
+                f"    os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n")
+            wrapper.chmod(0o700)
+            fault_args = ["--petals-python", str(wrapper)]
         launch("petals_backend.agent_entrypoint", ["--node-id", "agent-smoke", "--control-plane", f"http://127.0.0.1:{server.server_port}",
                "--listen", f"127.0.0.1:{agent_http}", "--advertise-host", "127.0.0.1", "--network-group", "private-smoke",
                "--petals-port", str(worker_p2p), "--petals-http", f"127.0.0.1:{worker_http}",
-               "--model-backend", f"127.0.0.1:{model_http}", "--model-dir", str(root), "--interval", "1s"], "agent", env)
+               "--model-backend", f"127.0.0.1:{model_http}", "--model-dir", str(root), "--interval", "1s", *fault_args], "agent", env)
 
         def states():
             with lock:
                 return [dict(r) for r in control["reports"]]
+
+        if args.allocator_oom:
+            wait(lambda: any(r["rpc_state"] == "failed" and r["model_state"] == "failed" for r in states()))
+            failure = states()[0]
+            assert "OutOfMemoryError" in failure["message"], failure
+            assert not health(worker_http)["ready"] and not health(model_http)["ready"]
+            request = Request(f"http://127.0.0.1:{agent_http}/inference/v1/chat/completions",
+                              data=b'{"messages":[{"role":"user","content":"Hello"}],"max_tokens":1}',
+                              headers={"Authorization": "Bearer " + auth, "X-Assignment-Token": lease, "X-Deployment-ID": dep})
+            try:
+                urlopen(request, timeout=3)
+            except HTTPError as error:
+                assert error.code == 503
+            else:
+                raise AssertionError("OOM deployment admitted inference")
+            with lock:
+                captured = json.loads(json.dumps(control["services"]))
+                control["stop"] = True
+            wait(lambda: any(r["rpc_state"] == "stopped" and r["model_state"] == "stopped" for r in states()), timeout=10)
+            summary = {"scope": "real Agent/actual CUDA allocator OOM under a 0.1% process budget; fake control transport, one GPU",
+                       "allocator_oom_observed": True, "inference_status": 503, "failure_and_stop_acknowledged": True,
+                       "services_at_failure": captured}
+            (root / "result.json").write_text(json.dumps(summary, indent=2))
+            print(json.dumps({"result_file": str(root / "result.json"), **{k: v for k, v in summary.items() if k != "services_at_failure"}}))
+            return
 
         wait(lambda: any(r["rpc_state"] == "ready" and r["model_state"] == "ready" for r in states()))
         with lock:

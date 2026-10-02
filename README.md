@@ -1,13 +1,13 @@
 # 算力协作平台
 
-目标是把多台普通 NVIDIA 显卡连接起来，让一个模型的权重和计算分布到多个节点。当前实现采用 llama.cpp RPC，控制面负责整组调度，Agent 启停实际推理进程，并提供每个服务的状态和流量监控。
+目标是把多台普通 NVIDIA 显卡连接起来，让一个模型的权重和计算分布到多个节点。当前支持 llama.cpp RPC、私有 Petals 连续模型块，以及单机 GPU + 内存；控制面负责整组调度，Agent 启停实际推理进程，并提供每个服务的状态和流量监控。
 
 ## 已实现
 
 - **分布式模型部署**：同一可信网络组内选择 2–8 个节点，每节点一张 GPU。按空闲显存扣除运行和 KV 缓存预算后规划；所有节点使用同一个引擎版本；整组原子预留、节点独占，拒绝重复 GPU UUID/RPC 地址。
 - **执行和生命周期**：Agent 启动 `ggml-rpc-server`；全部工作节点就绪后，协调节点启动 `llama-server`。模型加载成功才开放统一聊天接口，支持 SSE 流式输出。停止先排空推理，全部进程确认终止才释放资源。
 - **服务监控**：控制面、Web 控制台、Agent API、控制连接、每个 GPU RPC 工作进程、模型进程、推理入口，以及配置的基础设施健康和网络流量。未采集到的指标明确标记，不生成模拟值。
-- **监控栈**：Prometheus 抓取与 15 天保留，Grafana 18 个面板，cAdvisor 容器指标，7 条告警规则。Loki 已编排，但还没有接入日志采集器；工作进程日志可通过控制台查看最近片段。
+- **监控栈**：Prometheus 抓取与 15 天保留，Grafana 20 个面板，cAdvisor 容器指标，12 条告警规则。Alloy 按项目采集日志，Loki 持久化保留 7 天；按服务/节点/部署查询，工作进程最近片段仍可在控制台查看。
 - **统一聊天入口**：相同模型版本与后端的实例池，统一 `/v1/models`、`/v1/chat/completions`；每部署共享并发、排队、首 token/停滞/总超时和取消，旧部署入口也执行相同保护。控制台“聊天入口”显示真实请求进度。
 - **恢复**：节点、任务、部署、幂等键和资源预留原子保存到本地 JSON；重启后保留预留并等待 Agent 重新确认。单控制面，不是数据库集群或高可用方案。
 - **节点管理**：真实 `nvidia-smi` 心跳、显存、利用率、禁用/启用/排空。新节点默认禁止调度。保留旧版单节点调度 API，它只产生调度记录，不启动模型。
@@ -20,7 +20,7 @@
 
 控制台“模型部署”可选择执行方式、登记模型和预览 GPU/RAM 分配；“服务监控”显示主机实测内存、CPU 与部署预留。“网络与分组”支持有界的双向测量、链路矩阵和手动网络组；配置了策略的组必须有满足阈值的新鲜链路数据才能调度。状态文件升级为 v5，自动读取 v1–v4；降级前需停止新增类型部署并恢复升级前备份。
 
-这些功能已通过自动化与浏览器流程测试，并完成 RTX 5060 上真实 135M 模型的加载、预热、聊天、流式取消和停止验证。私有 Petals 已接入连续块调度、离线模型封装、网关、租约和各服务监控，实际单卡双进程推理、取消、断块和租约终止测试通过；部署步骤见 [私有 Petals](python/petals_backend/README.md)。**尚未完成真实 13B 模型和多机 GPU 性能验收**。集中日志采集和最终故障验收仍在进行，具体状态与证据见 [协作推理开发进度](docs/协作推理开发进度.md)。
+这些功能已通过自动化与浏览器流程测试，并完成 RTX 5060 上真实 135M 模型的加载、预热、聊天、流式取消和停止验证。私有 Petals 已接入连续块调度、离线模型封装、网关、租约和各服务监控，实际单卡双进程推理、取消、断块、冻结无响应和租约终止测试通过；部署步骤见 [私有 Petals](python/petals_backend/README.md)。集中日志已接入并实测，性能对照及隔离故障实验见 [日志与验收指南](docs/集中日志与协作推理验收.md)。**尚未完成真实 13B 模型和多机 GPU 性能验收**，具体状态与证据见 [协作推理开发进度](docs/协作推理开发进度.md)。
 
 ## 本地启动控制面和监控
 
@@ -31,7 +31,7 @@ cd web-console
 npm ci
 npm run build
 cd ..
-docker compose -f deploy/compose/docker-compose.yml --profile observability up -d --build control-plane prometheus grafana loki cadvisor
+docker compose -f deploy/compose/docker-compose.yml --profile observability up -d --build control-plane prometheus grafana loki cadvisor alloy
 ```
 
 默认入口：控制台 `http://127.0.0.1:8080`，Prometheus `http://127.0.0.1:9090`，Grafana `http://127.0.0.1:3000/d/compute-services`。Grafana 本地初始登录为 admin/admin。控制面状态保存在 `control-plane-data` 卷。

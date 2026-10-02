@@ -1,0 +1,63 @@
+// Discover only this Compose project. Unrelated containers are never targets.
+discovery.docker "platform" {
+  host = "unix:///var/run/docker.sock"
+  refresh_interval = "10s"
+  filter {
+    name = "label"
+    values = ["com.docker.compose.project=" + sys.env("MONITOR_COMPOSE_PROJECT")]
+  }
+}
+
+discovery.relabel "platform" {
+  targets = []
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label = "service_name"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label = "project"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex = "/(.*)"
+    target_label = "container"
+  }
+}
+
+loki.source.docker "platform" {
+  host = "unix:///var/run/docker.sock"
+  targets = discovery.docker.platform.targets
+  relabel_rules = discovery.relabel.platform.rules
+  labels = { "job" = "compute-platform", "host" = sys.env("LOG_HOST_ID") }
+  refresh_interval = "10s"
+  forward_to = [loki.process.platform.receiver]
+}
+
+loki.process "platform" {
+  // Bound first-start replay and long-outage catch-up to Loki's out-of-order
+  // window. Retention in Loki is seven days after successful ingestion.
+  stage.drop {
+    older_than = "55m"
+    drop_counter_reason = "outside_collection_window"
+  }
+  // Child processes emit JSON with bounded/redacted messages. Plain text
+  // infrastructure logs remain intact. Request IDs are queried, never labels.
+  stage.json {
+    expressions = { service_id = "service_id", node_id = "node_id", deployment_id = "deployment_id" }
+  }
+  stage.labels {
+    values = { service_id = "", node_id = "", deployment_id = "" }
+  }
+  forward_to = [loki.write.platform.receiver]
+}
+
+loki.write "platform" {
+  endpoint {
+    url = sys.env("LOKI_PUSH_URL")
+    remote_timeout = "10s"
+    min_backoff_period = "500ms"
+    max_backoff_period = "30s"
+    max_backoff_retries = 10
+  }
+}

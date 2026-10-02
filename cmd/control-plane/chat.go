@@ -9,8 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 	"github.com/resource-adjust/compute-platform/internal/platform"
 	"github.com/resource-adjust/compute-platform/internal/telemetry"
 )
+
+var inferenceLog = slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 func (s *apiServer) chatRoute(w http.ResponseWriter, r *http.Request, path string) bool {
 	switch {
@@ -155,7 +158,7 @@ func (s *apiServer) chatInference(w http.ResponseWriter, r *http.Request, direct
 	outcome := "upstream_error"
 	defer func() {
 		ticket.Finish(outcome)
-		log.Printf("inference request_id=%s deployment=%s model=%q outcome=%s duration_ms=%d", trace, id, model, outcome, time.Since(started).Milliseconds())
+		inferenceLog.Info("inference", "event", "inference_complete", "service_id", "chat-router", "request_id", trace, "deployment_id", id, "model", model, "outcome", outcome, "duration_ms", time.Since(started).Milliseconds())
 	}()
 	if ctx.Err() != nil {
 		outcome = "canceled"

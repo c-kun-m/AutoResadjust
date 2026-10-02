@@ -84,6 +84,26 @@ func TestRetiredServicesKeepTerminalState(t *testing.T) {
 		t.Fatal("retired worker not pruned")
 	}
 }
+
+func TestPrometheusDistinguishesFailureFromExpectedUnreadyStates(t *testing.T) {
+	r := New()
+	r.Register(Service{ID: "worker", Kind: "petals-worker"})
+	for _, state := range []string{"loading", "ready", "failed", "stopped", "arbitrary-agent-text"} {
+		r.State("worker", state, "")
+		out := httptest.NewRecorder()
+		r.Prometheus(out, httptest.NewRequest("GET", "/metrics", nil))
+		want := state
+		if state == "arbitrary-agent-text" {
+			want = "unknown"
+		}
+		if !strings.Contains(out.Body.String(), "platform_service_state{") || !strings.Contains(out.Body.String(), "state="+fmt.Sprintf("%q", want)+"} 1") {
+			t.Fatal(out.Body.String())
+		}
+		if strings.Contains(out.Body.String(), "arbitrary-agent-text") {
+			t.Fatal("unbounded state label")
+		}
+	}
+}
 func TestRPCProxyByteAccountingAndStop(t *testing.T) {
 	backend, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

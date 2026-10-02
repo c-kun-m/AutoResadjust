@@ -1,6 +1,36 @@
 groups:
   - name: compute-platform
     rules:
+      - alert: InferenceRuntimeUnavailable
+        expr: platform_service_state{kind=~"rpc-worker|petals-worker|model-server|inference-gateway",state=~"failed|degraded|offline"} == 1
+        for: 15s
+        labels: { severity: critical }
+        annotations:
+          summary: "Inference runtime {{ $labels.service }} is {{ $labels.state }}"
+      - alert: ControlPlaneCheckpointFailure
+        expr: platform_service_state{kind="control-plane",state="degraded"} == 1
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "Control plane state checkpoints are failing"
+      - alert: LogCollectorUnavailable
+        expr: up{job="alloy"} == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "Log collector {{ $labels.instance }} is unavailable"
+      - alert: LogDeliveryRetrying
+        expr: increase(loki_write_batch_retries_total[5m]) > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "Log collector cannot deliver batches to Loki reliably"
+      - alert: LogEntriesDropped
+        expr: increase(loki_write_dropped_entries_total[5m]) > 0
+        for: 0s
+        labels: { severity: critical }
+        annotations:
+          summary: "Log collector has discarded entries; inspect Loki and connectivity"
       - alert: InferenceGenerationStalled
         expr: increase(platform_inference_first_token_timeouts_total[5m]) + increase(platform_inference_idle_timeouts_total[5m]) + increase(platform_inference_total_timeouts_total[5m]) > 0
         for: 0s

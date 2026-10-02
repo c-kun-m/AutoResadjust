@@ -23,5 +23,8 @@ services:
       - "${CONTROL_PLANE_URL}"
     gpus: all
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     extra_hosts:
       - "host.docker.internal:host-gateway"

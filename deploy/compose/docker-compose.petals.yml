@@ -27,6 +27,9 @@ services:
       start_period: 30s
     restart: unless-stopped
     stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
   edge-agent:
     image: ${PETALS_AGENT_IMAGE:-compute-platform-petals-agent:local}
@@ -68,6 +71,9 @@ services:
       start_period: 30s
     restart: unless-stopped
     stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
 volumes:
   bootstrap-identity:

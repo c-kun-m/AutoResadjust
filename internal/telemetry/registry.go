@@ -361,6 +361,13 @@ func (r *Registry) Prometheus(w http.ResponseWriter, q *http.Request) {
 			up = 1
 		}
 		g("up", up)
+		state := s.Status
+		switch state {
+		case "starting", "pending", "preparing", "loading", "ready", "degraded", "draining", "stopping", "stopped", "failed", "offline":
+		default:
+			state = "unknown"
+		}
+		fmt.Fprintf(w, "platform_service_state{%s,state=%q} 1\n", labels, state)
 		g("last_seen_seconds", s.LastSeen.Unix())
 		g("active", s.Active)
 		g("restarts_total", s.Restarts)

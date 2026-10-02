@@ -1,0 +1,6 @@
+# Test-only image. Run with --network none --cap-add NET_ADMIN; production
+# agents never need this capability. The harness refuses any NIC except lo.
+FROM compute-platform-petals-compat:local
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 && rm -rf /var/lib/apt/lists/*
+COPY python/petals_backend /opt/platform/petals_backend
+ENTRYPOINT ["python", "-m", "petals_backend.runtime_smoke"]

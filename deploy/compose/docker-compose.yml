@@ -25,6 +25,9 @@ services:
       - control-plane-data:/data
       - ./services.json:/config/services.json:ro
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
   # These services are infrastructure placeholders for the production
   # adapters. The control plane checkpoints its in-memory state to a local file;
@@ -140,6 +143,24 @@ services:
       - "${LOKI_BIND:-127.0.0.1}:3100:3100"
     volumes:
       - ./loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+
+  alloy:
+    image: grafana/alloy:v1.20.1@sha256:2aa2099af76c0098d4af7a4d6e48f86cb66dc1a000222ad927a1c67c6542d13f
+    profiles: [observability]
+    command: [run, --server.http.listen-addr=0.0.0.0:12345, --storage.path=/var/lib/alloy/data, /etc/alloy/config.alloy]
+    environment:
+      MONITOR_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-compute-platform}
+      LOKI_PUSH_URL: http://loki:3100/loki/api/v1/push
+      LOG_HOST_ID: ${MONITOR_HOST_ID:-management}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./alloy.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
 volumes:
   control-plane-data:
@@ -149,3 +170,5 @@ volumes:
   minio-data:
   prometheus-data:
   grafana-data:
+  loki-data:
+  alloy-data:
