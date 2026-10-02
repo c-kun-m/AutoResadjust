@@ -23,6 +23,7 @@ import (
 )
 
 func runAgent() {
+	inspect := flag.Bool("inspect", false, "print this runtime's measured GPU/host inventory as JSON and exit without registering or starting services")
 	nodeID := flag.String("node-id", "", "stable node ID")
 	nodeName := flag.String("node-name", "", "display name")
 	site := flag.String("site", "default", "datacenter")
@@ -49,6 +50,14 @@ func runAgent() {
 	petalsHTTP := flag.String("petals-http", "127.0.0.1:18082", "local block health/metrics endpoint")
 	petalsState := flag.String("petals-state-dir", "state/petals", "private runtime configuration directory")
 	flag.Parse()
+	if *inspect {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := inspectNode(ctx, os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if *nodeID == "" || strings.ContainsAny(*nodeID, "/\\") {
 		log.Fatal("valid --node-id required")
 	}

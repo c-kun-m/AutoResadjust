@@ -42,6 +42,8 @@ docker compose -f deploy/compose/docker-compose.yml --profile observability up -
 
 ## 接入多台 GPU
 
+先按 [多机接入与验收清单](docs/多机接入与验收清单.md) 运行只读 `edge-agent --inspect`，核对主机与实际容器内的 GPU/内存报告。
+
 1. 每台物理机器安装 NVIDIA 驱动、WSL2/Docker GPU 支持，确认容器中的 `nvidia-smi` 可用。
 2. 管理端复制 `deploy/compose/.env.example`，配置共享令牌和私网监听地址。所有 Agent 使用相同令牌。
 3. 每台机器复制 `.env.distributed-agent.example`，填写唯一节点 ID、可互通的私网 IP、控制面地址和模型目录。每台运行一份 `docker-compose.distributed-agent.yml`，不要将同一张卡注册多次。

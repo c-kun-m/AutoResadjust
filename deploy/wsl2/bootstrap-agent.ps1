@@ -55,6 +55,7 @@ if (-not $docker) {
 Write-Host "Docker version:" -ForegroundColor DarkGray
 docker.exe version --format '{{.Server.Version}}'
 Write-Host "Docker GPU probe:" -ForegroundColor DarkGray
+Write-Host "This checks NVIDIA management access only, not CUDA model execution compatibility."
 docker.exe run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
 if ($LASTEXITCODE -ne 0) {
     throw "Docker cannot access the GPU. In Docker Desktop, enable the WSL2 engine and GPU support."
@@ -66,4 +67,6 @@ Write-Host "  SITE=$Site"
 Write-Host "  CONTROL_PLANE_URL=$ControlPlaneUrl"
 Write-Host "Create deploy/compose/.env.agent on this host with these values, then run:"
 Write-Host "  docker compose --env-file deploy/compose/.env.agent -f deploy/compose/docker-compose.agent.yml up -d --build"
-Write-Host "Use a different NODE_ID and SITE for every physical host."
+Write-Host "This starts inventory collection only. For inference use docker-compose.distributed-agent.yml or docker-compose.petals.yml."
+Write-Host "Use a different NODE_ID for each physical host. Hosts in the same location may share SITE."
+Write-Host "Read docs/多机接入与验收清单.md and collect an edge-agent --inspect report before enabling scheduling."
